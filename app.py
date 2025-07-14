@@ -1,9 +1,9 @@
 import os
-
 import openai
 from flask import Flask, request, render_template_string
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+# 從環境變數讀取 API 金鑰並建立客戶端
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 HTML = """
 <!doctype html>
@@ -26,7 +26,8 @@ def index():
     if request.method == "POST":
         text = request.form.get("text", "")
         if text:
-            response = openai.ChatCompletion.create(
+            # 使用新的 client.chat.completions.create 語法
+            response = client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
                     {"role": "system", "content": "You translate Chinese to English."},

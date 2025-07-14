@@ -1,35 +1,84 @@
-# AI Tutor
+# 動態 AI 英文家教 (v4.1)
 
-This project provides a simple web and CLI tool for translating Chinese sentences into English using an LLM API.
+這是一個基於大型語言模型（LLM）的智慧英文翻譯學習工具。它不僅僅是一個翻譯機或單純的錯題庫，而是一個能夠模擬台灣大學學測（GSAT）命題風格、並根據您的學習狀況動態調整複習策略的個人化家教。
 
-## Installation
+## 核心功能
 
-Install the required dependencies:
+  * **智慧學習回合 (Smart Learning Sessions)**
 
-```bash
-pip install -r requirements.txt
-```
+      * 每一輪學習都由「智慧複習題」和「全新挑戰題」動態組成。
+      * 您可以自由調整每輪的總題數（`SESSION_SIZE`）和複習題佔比（`REVIEW_RATIO`）。
 
-Set the `OPENAI_API_KEY` environment variable with your API key.
+  * **間隔重複系統 (Spaced Repetition System)**
 
-## Usage
+      * 程式內建了基於艾賓浩斯遺忘曲線（SM-2 演算法簡化版）的記憶排程。
+      * 答對的題目會以指數級增長的間隔延後複習；答錯的題目則會被重置，安排在隔天再次鞏固。
+      * 所有學習紀錄都會儲存在本地的 `learning_log.db` 資料庫檔案中。
 
-### Web Interface
+  * **學測等級考題生成 (Exam-Level Question Generation)**
 
-Run the web server:
+      * AI 會扮演「學測命題委員」的角色，參考您提供的 `翻譯句型.md` 文法書，設計出具有鑑別度的翻譯考題。
+      * 題目的難度、風格和主題都旨在模擬真實的學測方向，並略高於平均水平，以達到最佳訓練效果。
 
-```bash
-python app.py
-```
+  * **動態弱點分析 (換句話說)**
 
-Open your browser and visit `http://localhost:5000` to access the translator.
+      * 當複習您的舊錯題時，AI 不會再問完全一樣的句子。
+      * 相反地，它會分析您當時的錯誤核心，並從文法書中挑選合適的句型，「換句話說」地創造一個全新的題目來測驗您是否已真正理解該觀念。
 
-### Command Line
+  * **AI 監控模式 (AI Monitoring Mode)**
 
-Run the interactive translator:
+      * 內建一個可開關的監控模式（`MONITOR_MODE`）。
+      * 啟用後，您可以在終端機中看到每一次與 OpenAI API 溝通的完整 Prompt 指令和原始回覆，讓 AI 的工作流程完全透明化。
+
+## 安裝與設定
+
+1.  **取得專案檔案**
+    將所有專案檔案（`main.py`, `翻譯句型.md` 等）下載到您的本地資料夾。
+
+2.  **安裝相依套件**
+    本專案依賴 `openai` 套件。請透過 pip 安裝：
+
+    ```bash
+    pip install openai
+    ```
+
+3.  **設定 API 金鑰**
+    您必須設定您的 OpenAI API 金鑰。請將金鑰設定到名為 `OPENAI_API_KEY` 的環境變數中。
+
+4.  **準備文法書**
+    請確保 `翻譯句型.md` 檔案與 `main.py` 程式放在**同一個資料夾**下。程式啟動時會自動讀取此檔案作為 AI 的出題依據。
+
+## 如何使用
+
+完成設定後，直接在您的終端機中執行主程式：
 
 ```bash
 python main.py
 ```
 
-Then input Chinese sentences to receive English translations. Type `exit` to quit.
+程式啟動後會顯示主選單，您可以選擇：
+
+  * **1. 開始一輪智慧學習**: 進入核心的動態學習模式。
+  * **2. 瀏覽所有學習筆記**: 查看您在資料庫中的所有歷史紀錄。
+  * **3. 結束程式**: 退出應用程式。
+
+## 客製化設定
+
+您可以直接在 `main.py` 檔案的最上方修改以下參數，來調整您的學習體驗：
+
+  * `SESSION_SIZE`: 每一輪學習的總題目數量（預設為 5）。
+  * `REVIEW_RATIO`: 每一輪中「複習題」所佔的比例（預設為 0.7，即 70%）。
+  * `MONITOR_MODE`: 是否啟用 AI 輸入輸出監控模式（預設為 `True`）。
+
+## 檔案結構
+
+  * **`main.py`**: 應用程式的主要進入點與核心邏輯。
+  * **`翻譯句型.md`**: AI 的文法知識庫與出題依據，您可以自行擴充或修改。
+  * **`learning_log.db`**: 本地端 SQLite 資料庫，儲存您所有的學習與錯誤紀錄。此檔案會在您第一次執行程式後自動生成。
+  * **`requirements.txt`**: 專案的依賴套件列表。
+
+## 技術棧
+
+  * Python 3
+  * OpenAI API (GPT-4o)
+  * SQLite 3
