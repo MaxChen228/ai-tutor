@@ -1,9 +1,8 @@
-import os
+"""Simple web interface for the translator."""
 
-import openai
 from flask import Flask, request, render_template_string
 
-openai.api_key = os.getenv("OPENAI_API_KEY")
+from translator import translate, check_api_key
 
 HTML = """
 <!doctype html>
@@ -26,14 +25,11 @@ def index():
     if request.method == "POST":
         text = request.form.get("text", "")
         if text:
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You translate Chinese to English."},
-                    {"role": "user", "content": text}
-                ]
-            )
-            translation = response.choices[0].message.content.strip()
+            try:
+                check_api_key()
+                translation = translate(text)
+            except Exception as exc:
+                translation = f"Error: {exc}"
     return render_template_string(HTML, translation=translation)
 
 if __name__ == "__main__":
