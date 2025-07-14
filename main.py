@@ -258,12 +258,23 @@ def generate_question_batch(mistake_records, num_review, num_new):
             print("\n" + "*"*20 + " AI 備課 OUTPUT " + "*"*20)
             print(response_content)
             print("*"*56 + "\n")
+        
+        # 【修正】將回傳的字典轉換為清單
         response_data = json.loads(response_content)
         if isinstance(response_data, dict):
-            for key in response_data:
-                if isinstance(response_data[key], list):
-                    return response_data[key]
-        return response_data
+            # 檢查 response_data 的值是否為一個清單，如果是，直接返回
+            for value in response_data.values():
+                if isinstance(value, list):
+                    return value
+            # 如果不是，則將字典的所有值轉換成一個清單
+            return list(response_data.values())
+        # 如果回傳的直接就是清單 (雖然目前不是這種情況，但為了穩健性)
+        elif isinstance(response_data, list):
+            return response_data
+            
+        print("警告：AI 回傳的備課資料格式非預期的字典或清單。")
+        return None
+
     except Exception as e:
         print(f"AI 備課時發生錯誤 (有複習題): {e}")
         return None
@@ -319,12 +330,23 @@ def generate_new_question_batch(num_new):
             print("\n" + "*"*20 + " AI 備課 (新) OUTPUT " + "*"*20)
             print(response_content)
             print("*"*60 + "\n")
+
+        # 【修正】將回傳的字典轉換為清單
         response_data = json.loads(response_content)
         if isinstance(response_data, dict):
-            for key in response_data:
-                if isinstance(response_data[key], list):
-                    return response_data[key]
-        return response_data
+            # 檢查 response_data 的值是否為一個清單，如果是，直接返回
+            for value in response_data.values():
+                if isinstance(value, list):
+                    return value
+            # 如果不是，則將字典的所有值轉換成一個清單
+            return list(response_data.values())
+        # 如果回傳的直接就是清單
+        elif isinstance(response_data, list):
+            return response_data
+            
+        print("警告：AI 回傳的備課資料格式非預期的字典或清單。")
+        return None
+
     except Exception as e:
         print(f"AI 備課時發生錯誤 (無複習題): {e}")
         return None
