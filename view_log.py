@@ -8,64 +8,124 @@ DATABASE_FILE = "learning_log.db"
 
 def display_formatted_event(record):
     """
-    以一個美觀、易讀的卡片格式來顯示單筆學習事件。(原有的功能)
+    v5.0 版更新：以美觀的卡片格式，顯示單筆「學習事件」的完整紀錄。
+    能夠完美解析並逐條展示 `error_analysis` 清單中的所有錯誤。
     """
     record_dict = dict(record)
-    is_correct_str = "✅ 正確" if record_dict.get('is_correct') else "⚠️ 錯誤"
+    is_correct_str = "✅ 大致正確" if record_dict.get('is_correct') else "⚠️ 存在主要錯誤"
     timestamp_str = datetime.strptime(record_dict['timestamp'], '%Y-%m-%d %H:%M:%S.%f').strftime('%Y-%m-%d %H:%M')
 
-    print("\n" + "="*60)
-    print(f"學習紀錄 ID: {record_dict['id']} | 時間: {timestamp_str}")
+    print("\n" + "="*70)
+    print(f"學習事件 ID: {record_dict['id']} | 時間: {timestamp_str}")
     print(f"狀態: {is_correct_str} | 類型: {record_dict.get('question_type', 'N/A').capitalize()}")
-    if record_dict.get('question_type') == 'review':
-        print(f"來源錯題 ID: {record_dict.get('source_mistake_id')}")
-    print("="*60)
-    
+    print("="*70)
+
     print("\n【原始題目】")
     print(f"  {record_dict.get('chinese_sentence')}")
-    
+
     print("\n【你的作答】")
     print(f"  {record_dict.get('user_answer')}")
-    
+
+    print("\n--- 🎓 AI 家教點評 ---")
+
     try:
         feedback = json.loads(record_dict['ai_feedback_json'])
-        feedback_details = feedback.get('feedback', {})
-        suggestion = feedback_details.get('suggestion', 'N/A')
-        explanation = feedback_details.get('explanation', 'N/A')
-        
-        print("\n--- 🎓 AI 家教點評 ---")
-        print(f"  錯誤分類: {feedback.get('error_category', 'N/A')} -> {feedback.get('error_subcategory', 'N/A')}")
-        print("\n  [建議翻譯]")
+        suggestion = feedback.get('overall_suggestion', 'N/A')
+        print("\n  [整體建議翻譯]")
         print(f"    {suggestion}")
-        print("\n  [教學說明]")
-        for line in explanation.split('\n'):
-            print(f"    {line}")
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        print("\n--- 🎓 AI 家教點評 (原始JSON) ---")
+
+        error_analysis = feedback.get('error_analysis', [])
+        if not error_analysis:
+            print("\n  [詳細錯誤分析]")
+            print("    🎉 恭喜！AI沒有發現任何錯誤。")
+        else:
+            print("\n  [詳細錯誤分析]")
+            for i, error in enumerate(error_analysis, 1):
+                severity_str = "主要" if error.get('severity') == 'major' else "次要"
+                print(f"\n    {i}. ({severity_str}錯誤) {error.get('error_type', '')} - {error.get('error_subtype', '')}")
+                print(f"       - 原文片段: \"{error.get('original_phrase', 'N/A')}\"")
+                print(f"       - 建議修正: \"{error.get('correction', 'N/A')}\"")
+                print(f"       - 教學說明: {error.get('explanation', 'N/A')}")
+
+    except (json.JSONDecodeError, AttributeError, TypeError) as e:
+        print(f"\n  [錯誤分析] (無法解析，顯示原始資料)")
         print(record_dict['ai_feedback_json'])
 
-    print("="*60 + "\n")
+    print("="*70 + "\n")
 
-def display_raw_event(record):
+
+def view_learning_events(cursor):
     """
-    【新功能】以欄位:值的形式，顯示最原始的數據。
+    提供選單，讓使用者查看「學習事件」的日誌。
     """
-    # 將資料庫的 row 物件轉換為字典
-    record_dict = dict(record)
+    while True:
+        print("\n--- 📖 學習事件日誌檢視 ---")
+        print("1. 查看最新的 5 筆紀錄")
+        print("2. 查看所有「存在主要錯誤」的紀錄")
+        print("3. 返回主選單")
+        choice = input("請選擇 (1-3): ")
+
+        query = ""
+        if choice == '1':
+            query = "SELECT * FROM learning_events ORDER BY timestamp DESC LIMIT 5"
+        elif choice == '2':
+            query = "SELECT * FROM learning_events WHERE is_correct = 0 ORDER BY timestamp DESC"
+        elif choice == '3':
+            break
+        else:
+            print("無效的輸入。")
+            continue
+
+        cursor.execute(query)
+        records = cursor.fetchall()
+        if not records:
+            print("\n沒有找到符合條件的紀錄。")
+            continue
+        
+        # 逆序顯示，讓最新的在最下面，方便閱讀
+        for record in reversed(records):
+            display_formatted_event(record)
+        
+        print(f"--- 已顯示 {len(records)} 筆紀錄 ---")
+        input("\n按 Enter 鍵繼續...")
+
+
+def view_knowledge_points(cursor):
+    """
+    【v5.0 新功能】顯示「知識點儀表板」。
+    """
+    print("\n" + "#"*15 + " 🧠 個人知識點儀表板 " + "#"*15)
+    print("這裡會列出所有您曾經犯錯的知識點，並根據您目前的熟練度排序。")
+    print("熟練度越低，代表您越需要加強該觀念！")
+    print("-" * 55)
+
+    cursor.execute("SELECT category, subcategory, mastery_level, mistake_count, correct_count FROM knowledge_points ORDER BY mastery_level ASC, mistake_count DESC")
+    points = cursor.fetchall()
+
+    if not points:
+        print("\n太棒了！目前沒有任何弱點知識點紀錄。")
+        print("開始練習，系統就會自動為您建立分析報告。")
+        return
+
+    print(f"{'熟練度':<8} | {'總錯誤':<5} | {'總答對':<5} | {'知識點 (分類 -> 細項)'}")
+    print("-" * 65)
+
+    for point in points:
+        # 將熟練度轉換為進度條
+        mastery_bar = '█' * int(point['mastery_level'] * 2) # 每 0.5 熟練度顯示一個格子
+        mastery_bar = mastery_bar.ljust(10) # 補齊空格，總長度 10
+        
+        mastery_str = f"[{mastery_bar}]"
+        
+        mistakes = str(point['mistake_count']).center(5)
+        corrects = str(point['correct_count']).center(5)
+        
+        print(f"{mastery_str:<8} | {mistakes} | {corrects} | {point['category']} -> {point['subcategory']}")
     
-    print("\n" + "-"*25 + f" 原始數據 (ID: {record_dict['id']}) " + "-"*25)
-    # 遍歷字典中的每一個項目 (欄位名稱, 值)
-    for key, value in record_dict.items():
-        # 為了對齊，我們計算欄位名稱的長度
-        # str(key).ljust(20) 的意思是，讓 key 這個字串靠左對齊，總長度補滿到 20 個字元
-        print(f"{str(key).ljust(22)}: {value}")
-    print("-" * 75)
+    print("-" * 65)
 
 
 def main():
-    """
-    主程式，提供選單讓使用者選擇如何查看紀錄。
-    """
     if not os.path.exists(DATABASE_FILE):
         print(f"錯誤：找不到資料庫檔案 '{DATABASE_FILE}'。")
         print("請先執行 main.py 並完成至少一輪學習，以生成資料庫。")
@@ -76,60 +136,24 @@ def main():
     cursor = conn.cursor()
 
     while True:
-        print("\n--- 📊 學習日報檢視器 ---")
-        print("【一般模式】")
-        print("  1. 查看最新的 5 筆學習紀錄 (美化格式)")
-        print("  2. 查看所有「錯誤」的學習紀錄 (美化格式)")
-        print("\n【開發者模式】")
-        print("  3. 查看最新的 5 筆學習紀錄 (完全原始數據)")
-        print("  4. 查看所有「錯誤」的學習紀錄 (完全原始數據)")
-        print("\n  5. 退出")
-        choice = input("請選擇你要執行的操作 (1-5): ")
+        print("\n" + "="*20 + " 📊 AI 學習儀表板 (v5.0) " + "="*20)
+        print("1. 🧠 查看個人知識點儀表板 (建議！)")
+        print("2. 📖 查看詳細學習事件日誌")
+        print("3. 👋 退出程式")
+        choice = input("請輸入你的選擇 (1-3): ")
 
-        query = ""
-        is_raw_mode = False
-        
         if choice == '1':
-            query = "SELECT * FROM learning_events ORDER BY timestamp DESC LIMIT 5"
+            view_knowledge_points(cursor)
+            input("\n按 Enter 鍵返回主選單...")
         elif choice == '2':
-            query = "SELECT * FROM learning_events WHERE is_correct = 0 ORDER BY timestamp DESC"
+            view_learning_events(cursor)
         elif choice == '3':
-            query = "SELECT * FROM learning_events ORDER BY timestamp DESC LIMIT 5"
-            is_raw_mode = True # 開啟原始數據模式
-        elif choice == '4':
-            query = "SELECT * FROM learning_events WHERE is_correct = 0 ORDER BY timestamp DESC"
-            is_raw_mode = True # 開啟原始數據模式
-        elif choice == '5':
             break
         else:
-            print("無效的輸入，請重新選擇。")
-            continue
-
-        try:
-            cursor.execute(query)
-            records = cursor.fetchall()
-
-            if not records:
-                print("\n沒有找到符合條件的紀錄。")
-                continue
-
-            # 如果不是原始模式，就逆序顯示，讓舊的先出來
-            display_records = records if is_raw_mode else reversed(records)
-            
-            for record in display_records:
-                if is_raw_mode:
-                    display_raw_event(record)
-                else:
-                    display_formatted_event(record)
-            
-            input("\n按 Enter 鍵返回主選單...")
-
-        except sqlite3.OperationalError as e:
-            print(f"\n查詢資料庫時發生錯誤: {e}")
-            print("表格 'learning_events' 可能不存在。請確認您已使用最新版的 main.py 跑過學習流程。")
+            print("\n無效的輸入，請重新輸入。")
 
     conn.close()
-    print("感謝使用，下次見！")
+    print("\n感謝使用，下次見！")
 
 if __name__ == '__main__':
     main()
