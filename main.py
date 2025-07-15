@@ -40,6 +40,7 @@ def init_db():
     v5.0 版更新：初始化資料庫。
     - 建立 learning_events 表格，用於儲存所有原始學習紀錄。
     - 建立全新的 knowledge_points 表格，用於追蹤每個獨立知識點的掌握度。
+    【v5.2 改造】: 讓 knowledge_points 能儲存「具體」的錯誤片語和解釋。
     """
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
@@ -68,18 +69,20 @@ def init_db():
     )
     """)
     
-    # 2. 全新的「知識點」核心表格
+    # 2. 全新的「知識點」核心表格 (【v5.2 結構修改處】)
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS knowledge_points (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         category TEXT NOT NULL,
         subcategory TEXT NOT NULL,
+        correct_phrase TEXT NOT NULL,
+        explanation TEXT,
         mastery_level REAL DEFAULT 0.0,
         mistake_count INTEGER DEFAULT 0,
         correct_count INTEGER DEFAULT 0,
         last_reviewed_on DATETIME,
         next_review_date DATE,
-        UNIQUE(category, subcategory)
+        UNIQUE(correct_phrase)
     )
     """)
 
@@ -90,6 +93,7 @@ def init_db():
 def add_mistake(question_data, user_answer, feedback_data):
     """
     v5.0 版更新：儲存學習事件，並根據 AI 的詳細錯誤分析，更新 knowledge_points 表格。
+    【v5.2 改造】: 將「具體錯誤片語」作為獨立知識點存入資料庫。
     """
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
@@ -101,7 +105,6 @@ def add_mistake(question_data, user_answer, feedback_data):
     q_type = question_data.get('type', 'new')
     source_id = question_data.get('original_mistake_id')
     
-    # 決定代表性錯誤 (用於舊欄位，方便快速瀏覽)
     primary_error_category = "翻譯正確"
     primary_error_subcategory = "無"
     error_analysis = feedback_data.get('error_analysis', [])
@@ -126,26 +129,25 @@ def add_mistake(question_data, user_answer, feedback_data):
         feedback_json, datetime.datetime.now())
     )
     
-    # --- 2. 更新 knowledge_points 核心表格 ---
+    # --- 2. 更新 knowledge_points 核心表格 (【v5.2 核心修改處】) ---
     if not is_correct and error_analysis:
-        print("\n正在更新您的知識點弱點分析...")
+        print("\n正在更新您的具體知識點弱點分析...")
         for error in error_analysis:
             category = error.get('error_type')
             subcategory = error.get('error_subtype')
+            correct_phrase = error.get('correction')
+            explanation = error.get('explanation')
             
-            if not category or not subcategory:
+            if not category or not subcategory or not correct_phrase:
                 continue
 
-            # 檢查知識點是否存在
-            cursor.execute("SELECT * FROM knowledge_points WHERE category = ? AND subcategory = ?", (category, subcategory))
+            cursor.execute("SELECT * FROM knowledge_points WHERE correct_phrase = ?", (correct_phrase,))
             point = cursor.fetchone()
             
-            # 計算熟練度懲罰 (主要錯誤懲罰更重)
             severity_penalty = 0.5 if error.get('severity') == 'major' else 0.2
 
             if point:
-                # 更新現有知識點：增加錯誤次數，降低熟練度
-                new_mastery_level = max(0, point[3] - severity_penalty) # mastery_level 在 point[3]
+                new_mastery_level = max(0, point[5] - severity_penalty) # mastery_level 在 point[5]
                 cursor.execute(
                     """
                     UPDATE knowledge_points 
@@ -154,23 +156,25 @@ def add_mistake(question_data, user_answer, feedback_data):
                     """,
                     (new_mastery_level, datetime.datetime.now(), datetime.date.today() + datetime.timedelta(days=1), point[0])
                 )
-                print(f"  - 已記錄弱點：[{category} - {subcategory}]，熟練度下降。")
+                print(f"  - 已記錄弱點：[{correct_phrase}]，熟練度下降。")
             else:
-                # 新增知識點紀錄
                 cursor.execute(
                     """
-                    INSERT INTO knowledge_points (category, subcategory, mistake_count, mastery_level, last_reviewed_on, next_review_date)
-                    VALUES (?, ?, 1, 0.0, ?, ?)
+                    INSERT INTO knowledge_points (category, subcategory, correct_phrase, explanation, mistake_count, mastery_level, last_reviewed_on, next_review_date)
+                    VALUES (?, ?, ?, ?, 1, 0.0, ?, ?)
                     """,
-                    (category, subcategory, datetime.datetime.now(), datetime.date.today() + datetime.timedelta(days=1))
+                    (category, subcategory, correct_phrase, explanation, datetime.datetime.now(), datetime.date.today() + datetime.timedelta(days=1))
                 )
-                print(f"  - 已發現新弱點：[{category} - {subcategory}]，已加入複習計畫。")
+                print(f"  - 已發現新弱點：[{correct_phrase}]，已加入複習計畫。")
 
     conn.commit()
     conn.close()
 
     if not is_correct:
         print(f"\n(本句主要錯誤已歸檔：{primary_error_category} - {primary_error_subcategory})")
+
+
+
 
 def view_mistakes():
     try:
@@ -211,34 +215,39 @@ except openai.OpenAIError:
 def generate_question_batch(weak_points_str, num_review):
     """
     v5.0 版更新：(有複習題時使用) 根據學生的「知識點弱點報告」來生成一整輪的題目。
-    【v5.1 版修正】：增加對 AI 回傳格式的穩健性處理。
+    【v5.2 改造】：Prompt 全面升級，要求 AI 針對「具體用法」進行精準打擊出題。
     """
     system_prompt = f"""
-    你是一位為台灣大學入學考試（學測）設計英文翻譯題的資深命題委員。你的核心任務是根據一份指定的「句型文法書」以及一份關於學生的「個人知識點弱點分析報告」，為他量身打造 {num_review} 題複習考題。
+            你是一位頂尖的英文教學專家與命題者，專門設計「精準打擊」的複習題。你的核心任務是根據下方一份關於學生的「具體知識點弱點報告」，為他量身打造 {num_review} 題翻譯考題。
 
-    **你的核心工作原則：**
-    1.  **深度分析弱點**：你必須仔細分析下方報告中列出的學生弱點。你的每一道題都必須精準地針對報告中的一個或多個知識點進行測驗。
-    2.  **概念重生，而非重複**：絕對不要出重複的句子。你的任務是「換句話說」，用全新的情境和單字來考驗同一個核心觀念。
-    3.  **權威教材**：「句型文法書」是你唯一的出題依據，你必須從中尋找靈感來結合學生的弱點。
-    4.  **【重要指令】輸出格式**：你必須嚴格按照指定的 JSON 格式輸出。在 JSON 的 `new_sentence` 欄位中，**必須、且只能填入你設計的【中文】考題句子**。
-    
-    範例格式:
-    {{
-        "questions": [
-            {{ "new_sentence": "中文題目一" }},
-            {{ "new_sentence": "中文題目二" }}
-        ]
-    }}
-    """
-    user_prompt = f"請根據以上資料，為我生成 {num_review} 題針對上述弱點的複習題。請務必記得，在輸出的 JSON 中，`new_sentence` 欄位的值必須是中文句子。"
+            **你的核心工作原則：**
+            1.  **精準打擊**：你必須仔細分析報告中列出的每一個「正確用法」。你的每一道題都必須圍繞這個「正確用法」來設計，確保學生能在一个全新的句子中正確地使用它。
+            2.  **情境創造**：不要只滿足於替換單字。你要創造一個全新的、自然的、合乎邏輯的中文情境，使得「正確用法」是這個情境下最貼切的翻譯。
+            3.  **絕對保密**：在你的題目中，絕對不能出現「正確用法」的任何英文字眼。你的任務是提供中文情境，讓學生自己把正確的英文翻譯出來。
+            4.  **【重要指令】輸出格式**：你必須嚴格按照指定的 JSON 格式輸出。在 JSON 的 `new_sentence` 欄位中，**必須、且只能填入你設計的【中文】考題句子**。
+
+            範例格式:
+            {{
+                "questions": [
+                    {{ "new_sentence": "這份工作薪水很高，但另一方面，它需要經常加班。" }}
+                ]
+            }}
+            """
+    user_prompt = f"""
+        **【學生具體知識點弱點報告】**
+        {weak_points_str}
+        ---
+        請根據以上報告，為我生成 {num_review} 題能測驗出學生是否已經掌握這些「正確用法」的翻譯題。
+        請務必記得，在輸出的 JSON 中，`new_sentence` 欄位的值必須是中文句子。
+        """
 
     if MONITOR_MODE:
-        print("\n" + "="*20 + " AI 備課 (弱點) INPUT " + "="*20)
+        print("\n" + "="*20 + " AI 備課 (精準打擊) INPUT " + "="*20)
         print("--- SYSTEM PROMPT ---")
         print(system_prompt)
         print("\n--- USER PROMPT ---")
         print(user_prompt)
-        print("="*60 + "\n")
+        print("="*66 + "\n")
 
     try:
         response = client.chat.completions.create(
@@ -251,13 +260,12 @@ def generate_question_batch(weak_points_str, num_review):
         )
         response_content = response.choices[0].message.content
         if MONITOR_MODE:
-            print("\n" + "*"*20 + " AI 備課 (弱點) OUTPUT " + "*"*20)
+            print("\n" + "*"*20 + " AI 備課 (精準打擊) OUTPUT " + "*"*20)
             print(response_content)
-            print("*"*62 + "\n")
+            print("*"*68 + "\n")
         
         response_data = json.loads(response_content)
         
-        # 從 JSON 中提取問題列表 (無論 key 是什麼)
         questions_list = []
         if isinstance(response_data, dict):
             for value in response_data.values():
@@ -271,14 +279,11 @@ def generate_question_batch(weak_points_str, num_review):
             print("警告：AI 回傳的備課資料中找不到有效的問題列表。")
             return None
             
-        # 【修正核心】檢查列表內容，確保每個元素都是字典
         formatted_list = []
         for item in questions_list:
             if isinstance(item, str):
-                # 如果是字串，將其轉換為字典
                 formatted_list.append({"new_sentence": item})
             elif isinstance(item, dict):
-                # 如果本身就是字典，直接加入
                 formatted_list.append(item)
         
         return formatted_list
@@ -290,22 +295,21 @@ def generate_question_batch(weak_points_str, num_review):
 def generate_new_question_batch(num_new):
     """
     (僅用於無複習題時) AI 生成指定數量的新題目。
-    【v5.1 版修正】：增加對 AI 回傳格式的穩健性處理，並簡化 Prompt。
+    (此函式在 v5.0 中 prompt 維持不變，因為它沒有弱點報告可參考)
     """
     system_prompt = f"""
-    你是一位為台灣大學入學考試（學測）設計英文翻譯題的資深命題委員。你的任務是根據一份「句型文法書」，設計出 {num_new} 題全新的、具有挑戰性的翻譯考題。
+    你是一位為台灣大學入學考試（學測）設計英文翻譯題的資深命題委員。你的任務是根據一份指定的「句型文法書」與「頂尖命題範例分析」，設計出 {num_new} 題全新的、具有挑戰性的翻譯考題。
 
     **你的核心工作原則：**
-    1.  **權威教材**：「句型文法書」是你唯一的出題依據。
-    2.  **【重要指令】輸出格式**：你必須嚴格回傳一個 JSON 物件，其根部必須有一個名為 "questions" 的 key，其 value 是一個包含 {num_new} 個問題物件的列表。每個問題物件都必須有一個 `new_sentence` 的 key，其 value 是你設計的【中文】考題。
-    
-    範例格式:
-    {{
-        "questions": [
-            {{ "new_sentence": "直到深夜，這位科學家才意識到那個看似微不足道的實驗誤差，為他提供了關鍵線索。" }},
-            {{ "new_sentence": "現代社會中，我們再怎麼強調培養批判性思考能力的重要性也不為過。" }}
-        ]
-    }}
+    1.  **深度學習範例**：你必須深度學習下方的「頂尖命題範例分析」，你的出題風格、難度與巧思都應向這些範例看齊。
+    2.  **絕對權威的教材**：「句型文法書」是你唯一的出題依據。
+    3.  **【重要指令】輸出格式**：你必須嚴格按照指定的 JSON 格式輸出。在 JSON 的 `new_sentence` 欄位中，**必須、且只能填入你設計的【中文】考題句子**。
+
+    ---
+    **【頂尖命題範例分析 (你必須模仿的思維模式)】**
+    * **範例一**: 「直到深夜，這位科學家才意識到，正是這個看似微不足道的實驗誤差，為他的突破性研究提供了關鍵線索。」(結合倒裝與分裂句)
+    * **範例二**: 「現代社會中，我們再怎麼強調培養批判性思考能力的重要性也不為過，以免在資訊爆炸的時代迷失方向。」(結合 'cannot over-V' 與 'lest')
+
     ---
     **【句型文法書 (你的出題武器庫)】**
     {translation_patterns}
@@ -336,32 +340,16 @@ def generate_new_question_batch(num_new):
             print("*"*60 + "\n")
         
         response_data = json.loads(response_content)
-        
-        # 從 JSON 中提取問題列表 (無論 key 是什麼)
-        questions_list = []
         if isinstance(response_data, dict):
             for value in response_data.values():
                 if isinstance(value, list):
-                    questions_list = value
-                    break
+                    return value
+            return list(response_data.values())
         elif isinstance(response_data, list):
-            questions_list = response_data
-
-        if not questions_list:
-            print("警告：AI 回傳的備課資料中找不到有效的問題列表。")
-            return None
+            return response_data
             
-        # 【修正核心】檢查列表內容，確保每個元素都是字典
-        formatted_list = []
-        for item in questions_list:
-            if isinstance(item, str):
-                # 如果是字串，將其轉換為字典
-                formatted_list.append({"new_sentence": item})
-            elif isinstance(item, dict):
-                # 如果本身就是字典，直接加入
-                formatted_list.append(item)
-        
-        return formatted_list
+        print("警告：AI 回傳的備課資料格式非預期的字典或清單。")
+        return None
 
     except Exception as e:
         print(f"AI 備課時發生錯誤 (無複習題): {e}")
@@ -500,10 +488,10 @@ def get_due_knowledge_points(limit):
 def start_dynamic_session():
     """
     v5.0 版更新：圍繞「知識點」來建構整個學習流程。
+    【v5.2 改造】: 圍繞「具體知識點」進行，生成精準打擊 Prompt。
     """
     print(f"\n--- 🚀 準備開始新的一輪學習 (共 {SESSION_SIZE} 題) ---")
 
-    # 1. 獲取最需要複習的「知識點」
     num_review_questions = int(SESSION_SIZE * REVIEW_RATIO)
     due_knowledge_points = get_due_knowledge_points(num_review_questions)
     actual_num_review = len(due_knowledge_points)
@@ -512,17 +500,17 @@ def start_dynamic_session():
     questions_to_ask = []
     print("AI 老師正在為您備課，請稍候...")
 
-    # 2. 根據有無到期弱點，選擇不同的備課方式
     if actual_num_review > 0:
-        # 將知識點格式化，傳給 AI
-        weak_points_for_prompt = [f"- {p['category']}: {p['subcategory']}" for p in due_knowledge_points]
-        weak_points_str = "\n".join(weak_points_for_prompt)
-        print(f"正在針對您以下的 {actual_num_review} 個弱點設計考題：\n{weak_points_str}")
+        # 【v5.2 核心修改處】: 格式化弱點報告，包含具體用法和解釋
+        weak_points_for_prompt = [
+            f"- 錯誤分類: {p['category']} -> {p['subcategory']}\n  正確用法: \"{p['correct_phrase']}\"\n  核心觀念: {p['explanation']}"
+            for p in due_knowledge_points
+        ]
+        weak_points_str = "\n\n".join(weak_points_for_prompt)
+        print(f"正在針對您以下的 {actual_num_review} 個具體弱點設計考題：\n{weak_points_str}")
         
-        # 讓 AI 生成複習題 (針對知識點)
         review_questions = generate_question_batch(weak_points_str, actual_num_review)
         if review_questions:
-            # 為複習題打上標記，方便後續處理
             for q, point in zip(review_questions, due_knowledge_points):
                 q['type'] = 'review'
                 q['knowledge_point_id'] = point['id']
@@ -533,7 +521,6 @@ def start_dynamic_session():
         print(f"正在為您準備 {num_new_questions} 個全新挑戰...")
         new_questions = generate_new_question_batch(num_new_questions)
         if new_questions:
-            # 為新題目打上標記
             for q in new_questions:
                 q['type'] = 'new'
             questions_to_ask.extend(new_questions)
@@ -546,7 +533,7 @@ def start_dynamic_session():
     print("\nAI 老師已備課完成！準備好了嗎？")
     input("按 Enter 鍵開始上課...")
 
-    # 3. 【逐題上課】
+    # ... (後續的【逐題上課】邏輯完全不變) ...
     for i, question_data in enumerate(questions_to_ask, 1):
         print(f"\n--- 第 {i}/{len(questions_to_ask)} 題 ({question_data.get('type', '未知')}類型) ---")
         sentence = question_data.get('new_sentence', '（題目獲取失敗）')
@@ -561,10 +548,8 @@ def start_dynamic_session():
         print("\n--- 🎓 家教點評 ---")
         print(f"整體建議翻譯：{feedback_data.get('overall_suggestion', '無法獲取建議翻譯。')}")
 
-        # 無論對錯，都先儲存這筆學習紀錄，並更新犯錯的知識點
         add_mistake(question_data, user_answer, feedback_data)
         
-        # 【核心複習邏輯】如果這是一道「複習題」且「答對了」
         if question_data.get('type') == 'review' and feedback_data.get('is_generally_correct'):
             point_id = question_data.get('knowledge_point_id')
             mastery = question_data.get('mastery_level')
