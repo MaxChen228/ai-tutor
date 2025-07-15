@@ -211,6 +211,7 @@ except openai.OpenAIError:
 def generate_question_batch(weak_points_str, num_review):
     """
     v5.0 版更新：(有複習題時使用) 根據學生的「知識點弱點報告」來生成一整輪的題目。
+    【v5.1 版修正】：增加對 AI 回傳格式的穩健性處理。
     """
     system_prompt = f"""
     你是一位為台灣大學入學考試（學測）設計英文翻譯題的資深命題委員。你的核心任務是根據一份指定的「句型文法書」以及一份關於學生的「個人知識點弱點分析報告」，為他量身打造 {num_review} 題複習考題。
@@ -220,13 +221,14 @@ def generate_question_batch(weak_points_str, num_review):
     2.  **概念重生，而非重複**：絕對不要出重複的句子。你的任務是「換句話說」，用全新的情境和單字來考驗同一個核心觀念。
     3.  **權威教材**：「句型文法書」是你唯一的出題依據，你必須從中尋找靈感來結合學生的弱點。
     4.  **【重要指令】輸出格式**：你必須嚴格按照指定的 JSON 格式輸出。在 JSON 的 `new_sentence` 欄位中，**必須、且只能填入你設計的【中文】考題句子**。
-
-    ---
-    **【句型文法書 (你的出題武器庫)】**
-    {translation_patterns}
-    ---
-    **【學生個人知識點弱點分析報告】**
-    {weak_points_str}
+    
+    範例格式:
+    {{
+        "questions": [
+            {{ "new_sentence": "中文題目一" }},
+            {{ "new_sentence": "中文題目二" }}
+        ]
+    }}
     """
     user_prompt = f"請根據以上資料，為我生成 {num_review} 題針對上述弱點的複習題。請務必記得，在輸出的 JSON 中，`new_sentence` 欄位的值必須是中文句子。"
 
@@ -254,16 +256,32 @@ def generate_question_batch(weak_points_str, num_review):
             print("*"*62 + "\n")
         
         response_data = json.loads(response_content)
+        
+        # 從 JSON 中提取問題列表 (無論 key 是什麼)
+        questions_list = []
         if isinstance(response_data, dict):
             for value in response_data.values():
                 if isinstance(value, list):
-                    return value
-            return list(response_data.values())
+                    questions_list = value
+                    break
         elif isinstance(response_data, list):
-            return response_data
+            questions_list = response_data
+        
+        if not questions_list:
+            print("警告：AI 回傳的備課資料中找不到有效的問題列表。")
+            return None
             
-        print("警告：AI 回傳的備課資料格式非預期的字典或清單。")
-        return None
+        # 【修正核心】檢查列表內容，確保每個元素都是字典
+        formatted_list = []
+        for item in questions_list:
+            if isinstance(item, str):
+                # 如果是字串，將其轉換為字典
+                formatted_list.append({"new_sentence": item})
+            elif isinstance(item, dict):
+                # 如果本身就是字典，直接加入
+                formatted_list.append(item)
+        
+        return formatted_list
 
     except Exception as e:
         print(f"AI 備課時發生錯誤 (有複習題): {e}")
@@ -272,21 +290,22 @@ def generate_question_batch(weak_points_str, num_review):
 def generate_new_question_batch(num_new):
     """
     (僅用於無複習題時) AI 生成指定數量的新題目。
-    (此函式在 v5.0 中 prompt 維持不變，因為它沒有弱點報告可參考)
+    【v5.1 版修正】：增加對 AI 回傳格式的穩健性處理，並簡化 Prompt。
     """
     system_prompt = f"""
-    你是一位為台灣大學入學考試（學測）設計英文翻譯題的資深命題委員。你的任務是根據一份指定的「句型文法書」與「頂尖命題範例分析」，設計出 {num_new} 題全新的、具有挑戰性的翻譯考題。
+    你是一位為台灣大學入學考試（學測）設計英文翻譯題的資深命題委員。你的任務是根據一份「句型文法書」，設計出 {num_new} 題全新的、具有挑戰性的翻譯考題。
 
     **你的核心工作原則：**
-    1.  **深度學習範例**：你必須深度學習下方的「頂尖命題範例分析」，你的出題風格、難度與巧思都應向這些範例看齊。
-    2.  **絕對權威的教材**：「句型文法書」是你唯一的出題依據。
-    3.  **【重要指令】輸出格式**：你必須嚴格按照指定的 JSON 格式輸出。在 JSON 的 `new_sentence` 欄位中，**必須、且只能填入你設計的【中文】考題句子**。
-
-    ---
-    **【頂尖命題範例分析 (你必須模仿的思維模式)】**
-    * **範例一**: 「直到深夜，這位科學家才意識到，正是這個看似微不足道的實驗誤差，為他的突破性研究提供了關鍵線索。」(結合倒裝與分裂句)
-    * **範例二**: 「現代社會中，我們再怎麼強調培養批判性思考能力的重要性也不為過，以免在資訊爆炸的時代迷失方向。」(結合 'cannot over-V' 與 'lest')
-
+    1.  **權威教材**：「句型文法書」是你唯一的出題依據。
+    2.  **【重要指令】輸出格式**：你必須嚴格回傳一個 JSON 物件，其根部必須有一個名為 "questions" 的 key，其 value 是一個包含 {num_new} 個問題物件的列表。每個問題物件都必須有一個 `new_sentence` 的 key，其 value 是你設計的【中文】考題。
+    
+    範例格式:
+    {{
+        "questions": [
+            {{ "new_sentence": "直到深夜，這位科學家才意識到那個看似微不足道的實驗誤差，為他提供了關鍵線索。" }},
+            {{ "new_sentence": "現代社會中，我們再怎麼強調培養批判性思考能力的重要性也不為過。" }}
+        ]
+    }}
     ---
     **【句型文法書 (你的出題武器庫)】**
     {translation_patterns}
@@ -317,16 +336,32 @@ def generate_new_question_batch(num_new):
             print("*"*60 + "\n")
         
         response_data = json.loads(response_content)
+        
+        # 從 JSON 中提取問題列表 (無論 key 是什麼)
+        questions_list = []
         if isinstance(response_data, dict):
             for value in response_data.values():
                 if isinstance(value, list):
-                    return value
-            return list(response_data.values())
+                    questions_list = value
+                    break
         elif isinstance(response_data, list):
-            return response_data
+            questions_list = response_data
+
+        if not questions_list:
+            print("警告：AI 回傳的備課資料中找不到有效的問題列表。")
+            return None
             
-        print("警告：AI 回傳的備課資料格式非預期的字典或清單。")
-        return None
+        # 【修正核心】檢查列表內容，確保每個元素都是字典
+        formatted_list = []
+        for item in questions_list:
+            if isinstance(item, str):
+                # 如果是字串，將其轉換為字典
+                formatted_list.append({"new_sentence": item})
+            elif isinstance(item, dict):
+                # 如果本身就是字典，直接加入
+                formatted_list.append(item)
+        
+        return formatted_list
 
     except Exception as e:
         print(f"AI 備課時發生錯誤 (無複習題): {e}")
