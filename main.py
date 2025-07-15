@@ -41,14 +41,32 @@ def init_db():
     """
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
+    
     print("正在檢查並初始化資料庫...")
 
-    # learning_events 表格維持不變
+    # 【修正處】: learning_events 表格的欄位必須完整定義
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS learning_events (...)
+    CREATE TABLE IF NOT EXISTS learning_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        question_type TEXT NOT NULL,
+        source_mistake_id INTEGER,
+        chinese_sentence TEXT NOT NULL,
+        intended_pattern TEXT,
+        user_answer TEXT,
+        is_correct BOOLEAN NOT NULL,
+        response_time REAL,
+        self_assessment_score INTEGER,
+        error_category TEXT,
+        error_subcategory TEXT,
+        ai_feedback_json TEXT,
+        difficulty REAL,
+        stability REAL,
+        next_review_date DATE,
+        timestamp DATETIME NOT NULL
+    )
     """)
     
-    # 【v5.3 結構修改處】
+    # knowledge_points 表格的結構是正確的，維持不變
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS knowledge_points (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -58,26 +76,6 @@ def init_db():
         explanation TEXT,
         user_context_sentence TEXT,
         incorrect_phrase_in_context TEXT,
-        mastery_level REAL DEFAULT 0.0,
-        mistake_count INTEGER DEFAULT 0,
-        correct_count INTEGER DEFAULT 0,
-        last_reviewed_on DATETIME,
-        next_review_date DATE,
-        UNIQUE(correct_phrase)
-    )
-    """)
-    conn.commit()
-    conn.close()
-    print("資料庫 learning_events 和 knowledge_points 表格已準備就緒。")
-    
-    # 2. 全新的「知識點」核心表格 (【v5.2 結構修改處】)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS knowledge_points (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        category TEXT NOT NULL,
-        subcategory TEXT NOT NULL,
-        correct_phrase TEXT NOT NULL,
-        explanation TEXT,
         mastery_level REAL DEFAULT 0.0,
         mistake_count INTEGER DEFAULT 0,
         correct_count INTEGER DEFAULT 0,
