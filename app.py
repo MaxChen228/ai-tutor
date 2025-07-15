@@ -1,18 +1,26 @@
 # app.py - 您的 AI 家教後端 API 伺服器
 import os
-import json # 確保在檔案頂部 import json
+import json
 from flask import Flask, request, jsonify
 import main as tutor  # 我們將 main.py 引用並取名為 tutor，方便呼叫
+import psycopg2 # 引入 PostgreSQL 驅動
+import psycopg2.extras # 引入用於字典 cursor 的額外功能
 
 # --- 初始化 Flask 應用 ---
 app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False # 讓回傳的 JSON 可以正確顯示中文
 
 # --- 應用程式啟動時，初始化資料庫 ---
-print("正在初始化資料庫...")
-tutor.init_db()
-print("資料庫準備就緒。")
-
+# 確保 DATABASE_URL 已設定，否則 init_db() 會中斷程式
+if tutor.DATABASE_URL:
+    print("正在初始化資料庫...")
+    tutor.init_db()
+    print("資料庫準備就緒。")
+else:
+    print("錯誤：未設定 DATABASE_URL 環境變數，伺服器無法啟動。")
+    # 在實際部署中，如果沒有資料庫URL，伺服器應該無法啟動
+    # 這裡只印出錯誤，但 gunicorn 可能仍會嘗試運行
+    # 最好的做法是在 Render 的啟動命令中檢查環境變數
 
 # --- API 端點 0: 根目錄歡迎頁面 (可選) ---
 @app.route("/", methods=['GET'])
@@ -20,7 +28,7 @@ def index():
     """
     提供一個簡單的歡迎訊息，避免直接訪問根目錄時出現 404 錯誤。
     """
-    return "<h1>AI Tutor API is running!</h1><p>請使用 /start_session, /submit_answer, /get_dashboard, /get_flashcards 端點。</p>"
+    return "<h1>AI Tutor API (v5.4 PostgreSQL) is running!</h1><p>請使用 /start_session, /submit_answer, /get_dashboard, /get_flashcards 端點。</p>"
 
 
 # --- API 端點 1: 開始一輪新的學習 ---
@@ -28,6 +36,7 @@ def index():
 def start_session_endpoint():
     """
     iOS App 從這裡獲取新一輪的題目。
+    【v5.4 PostgreSQL 版】: 此函式邏輯不變，因為它不直接操作資料庫。
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
     session_size = tutor.SESSION_SIZE
@@ -40,8 +49,12 @@ def start_session_endpoint():
     print(f"[API] 準備生成 {actual_num_review} 題複習題和 {num_new_questions} 題新題目。")
 
     if actual_num_review > 0:
-        weak_points_for_prompt = [f"- {p['category']}: {p['subcategory']}" for p in due_knowledge_points]
-        weak_points_str = "\n".join(weak_points_for_prompt)
+        # v5.2 之後的精準打擊 prompt 格式
+        weak_points_for_prompt = [
+            f"- 錯誤分類: {p['category']} -> {p['subcategory']}\n  正確用法: \"{p['correct_phrase']}\"\n  核心觀念: {p['explanation']}"
+            for p in due_knowledge_points
+        ]
+        weak_points_str = "\n\n".join(weak_points_for_prompt)
         review_questions = tutor.generate_question_batch(weak_points_str, actual_num_review)
         if review_questions:
             for q, point in zip(review_questions, due_knowledge_points):
@@ -73,6 +86,7 @@ def start_session_endpoint():
 def submit_answer_endpoint():
     """
     iOS App 將使用者作答的內容傳到這裡來批改。
+    【v5.4 PostgreSQL 版】: 此函式邏輯不變，因為它不直接操作資料庫。
     """
     print("\n[API] 收到請求：批改使用者答案...")
     data = request.get_json()
@@ -102,32 +116,26 @@ def submit_answer_endpoint():
 @app.route("/get_dashboard", methods=['GET'])
 def get_dashboard_endpoint():
     """
-    提供知識點儀表板所需的數據。
-    【v5.2 修改】: 確保 SELECT 查詢包含所有 App 需要的新欄位。
+    【v5.4 PostgreSQL 版】: 使用新的連線函式和字典 cursor。
     """
     print("\n[API] 收到請求：獲取知識點儀表板數據...")
     conn = None
     try:
-        conn = tutor.sqlite3.connect(tutor.DATABASE_FILE)
-        conn.row_factory = tutor.sqlite3.Row
-        cursor = conn.cursor()
-        
-        # 【核心修改處】: 在 SELECT 中加入 correct_phrase 和 explanation
-        cursor.execute("""
-            SELECT 
-                category, subcategory, correct_phrase, explanation, 
-                user_context_sentence, incorrect_phrase_in_context, 
-                mastery_level, mistake_count, correct_count 
-            FROM knowledge_points 
-            ORDER BY mastery_level ASC, mistake_count DESC
-        """)
-        
-        points_raw = cursor.fetchall()
-        # 將資料轉換為字典列表 (這一步會自動包含所有被選中的欄位)
+        conn = tutor.get_db_connection()
+        # 使用 DictCursor 讓回傳的結果可以用欄位名稱存取
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            cursor.execute("""
+                SELECT 
+                    category, subcategory, correct_phrase, explanation, 
+                    user_context_sentence, incorrect_phrase_in_context, 
+                    mastery_level, mistake_count, correct_count 
+                FROM knowledge_points 
+                ORDER BY mastery_level ASC, mistake_count DESC
+            """)
+            points_raw = cursor.fetchall()
+        # DictCursor 回傳的結果可以直接轉換為字典列表
         points_dict = [dict(row) for row in points_raw]
-        
         return jsonify({"knowledge_points": points_dict})
-        
     except Exception as e:
         print(f"[API] 獲取儀表板數據時發生嚴重錯誤: {e}")
         return jsonify({"error": str(e)}), 500
@@ -136,17 +144,13 @@ def get_dashboard_endpoint():
             conn.close()
 
 
-# --- API 端點 4: 根據錯誤類型獲取單字卡數據 (新功能) ---
+# --- API 端點 4: 根據錯誤類型獲取單字卡數據 ---
 @app.route("/get_flashcards", methods=['GET'])
 def get_flashcards_endpoint():
     """
-    接收一個或多個 error_type 作為參數，
-    從資料庫中提取所有符合條件的錯誤，並格式化成單字卡列表回傳。
-    範例請求: /get_flashcards?types=慣用語不熟,介系詞搭配
+    【v5.4 PostgreSQL 版】: 使用新的連線函式。
     """
     print("\n[API] 收到請求：獲取單字卡數據...")
-    
-    # 從請求的 URL 中獲取使用者想複習的類型
     types_str = request.args.get('types', '')
     if not types_str:
         return jsonify({"error": "請提供要查詢的錯誤類型(types)。"}), 400
@@ -155,14 +159,14 @@ def get_flashcards_endpoint():
     print(f"[API] 準備查詢以下類型的單字卡: {types_to_fetch}")
     
     flashcards = []
-    unique_checker = set() # 用來避免加入完全重複的卡片
+    unique_checker = set()
     conn = None
     try:
-        conn = tutor.sqlite3.connect(tutor.DATABASE_FILE)
-        cursor = conn.cursor()
-
-        cursor.execute("SELECT ai_feedback_json FROM learning_events WHERE is_correct = 0")
-        all_events = cursor.fetchall()
+        conn = tutor.get_db_connection()
+        with conn.cursor() as cursor:
+            # 查詢 is_correct=false 的事件
+            cursor.execute("SELECT ai_feedback_json FROM learning_events WHERE is_correct = false")
+            all_events = cursor.fetchall()
         
         for event in all_events:
             if not event[0]: continue
@@ -176,10 +180,9 @@ def get_flashcards_endpoint():
                     card_front = error.get('original_phrase', 'N/A')
                     card_back_correction = error.get('correction', 'N/A')
                     
-                    # 建立一個唯一標識符，避免內容完全相同的卡片被重複加入
                     card_identifier = (card_front, card_back_correction)
                     if card_identifier in unique_checker:
-                        continue # 如果已經存在，則跳過
+                        continue
                     
                     unique_checker.add(card_identifier)
 
@@ -207,7 +210,10 @@ if __name__ == '__main__':
     # 確保您已經設定了 OPENAI_API_KEY 環境變數
     if not os.getenv("OPENAI_API_KEY"):
         print("錯誤：請先設定 OPENAI_API_KEY 環境變數！")
+    # 確保資料庫 URL 已設定
+    if not os.getenv("DATABASE_URL"):
+        print("錯誤：請先設定 DATABASE_URL 環境變數！")
     else:
         # debug=True 讓您修改程式碼後伺服器會自動重啟，方便開發
         # 當部署到 Render 時，它會使用 gunicorn，這個設定會被忽略
-        app.run(debug=True, port=5000)
+        app.run(host='0.0.0.0', port=5000, debug=True)
