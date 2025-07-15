@@ -115,13 +115,9 @@ def get_dashboard_endpoint():
         # 【核心修改處】: 在 SELECT 中加入 correct_phrase 和 explanation
         cursor.execute("""
             SELECT 
-                category, 
-                subcategory, 
-                correct_phrase, 
-                explanation, 
-                mastery_level, 
-                mistake_count, 
-                correct_count 
+                category, subcategory, correct_phrase, explanation, 
+                user_context_sentence, incorrect_phrase_in_context, 
+                mastery_level, mistake_count, correct_count 
             FROM knowledge_points 
             ORDER BY mastery_level ASC, mistake_count DESC
         """)

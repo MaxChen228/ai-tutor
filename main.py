@@ -37,37 +37,38 @@ def update_db_schema():
 
 def init_db():
     """
-    v5.0 版更新：初始化資料庫。
-    - 建立 learning_events 表格，用於儲存所有原始學習紀錄。
-    - 建立全新的 knowledge_points 表格，用於追蹤每個獨立知識點的掌握度。
-    【v5.2 改造】: 讓 knowledge_points 能儲存「具體」的錯誤片語和解釋。
+    【v5.3 改造】: 為 knowledge_points 加入使用者作答的上下文句子，以提供更豐富的複習情境。
     """
     conn = sqlite3.connect(DATABASE_FILE)
     cursor = conn.cursor()
-    
     print("正在檢查並初始化資料庫...")
 
-    # 1. 學習事件日誌 (保留不變，作為原始紀錄)
+    # learning_events 表格維持不變
     cursor.execute("""
-    CREATE TABLE IF NOT EXISTS learning_events (
+    CREATE TABLE IF NOT EXISTS learning_events (...)
+    """)
+    
+    # 【v5.3 結構修改處】
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS knowledge_points (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        question_type TEXT NOT NULL,
-        source_mistake_id INTEGER,
-        chinese_sentence TEXT NOT NULL,
-        intended_pattern TEXT,
-        user_answer TEXT,
-        is_correct BOOLEAN NOT NULL,
-        response_time REAL,
-        self_assessment_score INTEGER,
-        error_category TEXT,
-        error_subcategory TEXT,
-        ai_feedback_json TEXT,
-        difficulty REAL,
-        stability REAL,
+        category TEXT NOT NULL,
+        subcategory TEXT NOT NULL,
+        correct_phrase TEXT NOT NULL,
+        explanation TEXT,
+        user_context_sentence TEXT,
+        incorrect_phrase_in_context TEXT,
+        mastery_level REAL DEFAULT 0.0,
+        mistake_count INTEGER DEFAULT 0,
+        correct_count INTEGER DEFAULT 0,
+        last_reviewed_on DATETIME,
         next_review_date DATE,
-        timestamp DATETIME NOT NULL
+        UNIQUE(correct_phrase)
     )
     """)
+    conn.commit()
+    conn.close()
+    print("資料庫 learning_events 和 knowledge_points 表格已準備就緒。")
     
     # 2. 全新的「知識點」核心表格 (【v5.2 結構修改處】)
     cursor.execute("""
@@ -137,33 +138,35 @@ def add_mistake(question_data, user_answer, feedback_data):
             subcategory = error.get('error_subtype')
             correct_phrase = error.get('correction')
             explanation = error.get('explanation')
+            incorrect_phrase = error.get('original_phrase') # 獲取句子中錯誤的片語
             
             if not category or not subcategory or not correct_phrase:
                 continue
 
             cursor.execute("SELECT * FROM knowledge_points WHERE correct_phrase = ?", (correct_phrase,))
             point = cursor.fetchone()
-            
             severity_penalty = 0.5 if error.get('severity') == 'major' else 0.2
 
             if point:
-                new_mastery_level = max(0, point[5] - severity_penalty) # mastery_level 在 point[5]
+                new_mastery_level = max(0, point[7] - severity_penalty) # mastery_level 在新結構的索引 7
+                # 【修改】更新時，覆蓋最新的錯誤情境
                 cursor.execute(
                     """
                     UPDATE knowledge_points 
-                    SET mistake_count = mistake_count + 1, mastery_level = ?, last_reviewed_on = ?, next_review_date = ?
+                    SET mistake_count = mistake_count + 1, mastery_level = ?, user_context_sentence = ?, incorrect_phrase_in_context = ?, last_reviewed_on = ?, next_review_date = ?
                     WHERE id = ?
                     """,
-                    (new_mastery_level, datetime.datetime.now(), datetime.date.today() + datetime.timedelta(days=1), point[0])
+                    (new_mastery_level, user_answer, incorrect_phrase, datetime.datetime.now(), datetime.date.today() + datetime.timedelta(days=1), point[0])
                 )
-                print(f"  - 已記錄弱點：[{correct_phrase}]，熟練度下降。")
+                print(f"  - 已更新弱點：[{correct_phrase}]，熟練度下降。")
             else:
+                # 【修改】新增時，寫入錯誤情境
                 cursor.execute(
                     """
-                    INSERT INTO knowledge_points (category, subcategory, correct_phrase, explanation, mistake_count, mastery_level, last_reviewed_on, next_review_date)
-                    VALUES (?, ?, ?, ?, 1, 0.0, ?, ?)
+                    INSERT INTO knowledge_points (category, subcategory, correct_phrase, explanation, user_context_sentence, incorrect_phrase_in_context, mistake_count, mastery_level, last_reviewed_on, next_review_date)
+                    VALUES (?, ?, ?, ?, ?, ?, 1, 0.0, ?, ?)
                     """,
-                    (category, subcategory, correct_phrase, explanation, datetime.datetime.now(), datetime.date.today() + datetime.timedelta(days=1))
+                    (category, subcategory, correct_phrase, explanation, user_answer, incorrect_phrase, datetime.datetime.now(), datetime.date.today() + datetime.timedelta(days=1))
                 )
                 print(f"  - 已發現新弱點：[{correct_phrase}]，已加入複習計畫。")
 
