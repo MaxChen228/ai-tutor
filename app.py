@@ -103,6 +103,7 @@ def submit_answer_endpoint():
 def get_dashboard_endpoint():
     """
     提供知識點儀表板所需的數據。
+    【v5.2 修改】: 確保 SELECT 查詢包含所有 App 需要的新欄位。
     """
     print("\n[API] 收到請求：獲取知識點儀表板數據...")
     conn = None
@@ -110,11 +111,29 @@ def get_dashboard_endpoint():
         conn = tutor.sqlite3.connect(tutor.DATABASE_FILE)
         conn.row_factory = tutor.sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT category, subcategory, mastery_level, mistake_count, correct_count FROM knowledge_points ORDER BY mastery_level ASC, mistake_count DESC")
+        
+        # 【核心修改處】: 在 SELECT 中加入 correct_phrase 和 explanation
+        cursor.execute("""
+            SELECT 
+                category, 
+                subcategory, 
+                correct_phrase, 
+                explanation, 
+                mastery_level, 
+                mistake_count, 
+                correct_count 
+            FROM knowledge_points 
+            ORDER BY mastery_level ASC, mistake_count DESC
+        """)
+        
         points_raw = cursor.fetchall()
+        # 將資料轉換為字典列表 (這一步會自動包含所有被選中的欄位)
         points_dict = [dict(row) for row in points_raw]
+        
         return jsonify({"knowledge_points": points_dict})
+        
     except Exception as e:
+        print(f"[API] 獲取儀表板數據時發生嚴重錯誤: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if conn:

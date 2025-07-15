@@ -92,14 +92,15 @@ def view_learning_events(cursor):
 
 def view_knowledge_points(cursor):
     """
-    【v5.0 新功能】顯示「知識點儀表板」。
+    【v5.2 改造】顯示「具體知識點儀表板」。
     """
-    print("\n" + "#"*15 + " 🧠 個人知識點儀表板 " + "#"*15)
-    print("這裡會列出所有您曾經犯錯的知識點，並根據您目前的熟練度排序。")
+    print("\n" + "#"*15 + " 🧠 個人化知識點儀表板 " + "#"*15)
+    print("這裡會列出您所有犯過的「具體」錯誤，並根據您目前的熟練度排序。")
     print("熟練度越低，代表您越需要加強該觀念！")
-    print("-" * 55)
+    print("-" * 80)
 
-    cursor.execute("SELECT category, subcategory, mastery_level, mistake_count, correct_count FROM knowledge_points ORDER BY mastery_level ASC, mistake_count DESC")
+    # 【修改】從資料庫讀取包含新欄位的資料
+    cursor.execute("SELECT category, subcategory, correct_phrase, explanation, mastery_level, mistake_count, correct_count FROM knowledge_points ORDER BY mastery_level ASC, mistake_count DESC")
     points = cursor.fetchall()
 
     if not points:
@@ -107,22 +108,31 @@ def view_knowledge_points(cursor):
         print("開始練習，系統就會自動為您建立分析報告。")
         return
 
-    print(f"{'熟練度':<8} | {'總錯誤':<5} | {'總答對':<5} | {'知識點 (分類 -> 細項)'}")
-    print("-" * 65)
+    # 【修改】重新設計表頭以容納更多資訊
+    print(f"{'熟練度':<12} | {'錯誤':<4} | {'答對':<4} | {'具體知識點 (正確用法)'}")
+    print("-" * 80)
 
     for point in points:
-        # 將熟練度轉換為進度條
-        mastery_bar = '█' * int(point['mastery_level'] * 2) # 每 0.5 熟練度顯示一個格子
-        mastery_bar = mastery_bar.ljust(10) # 補齊空格，總長度 10
-        
+        # 熟練度進度條 (不變)
+        mastery_bar = '█' * int(point['mastery_level'] * 2)
+        mastery_bar = mastery_bar.ljust(10)
         mastery_str = f"[{mastery_bar}]"
         
-        mistakes = str(point['mistake_count']).center(5)
-        corrects = str(point['correct_count']).center(5)
+        mistakes = str(point['mistake_count']).center(4)
+        corrects = str(point['correct_count']).center(4)
         
-        print(f"{mastery_str:<8} | {mistakes} | {corrects} | {point['category']} -> {point['subcategory']}")
-    
-    print("-" * 65)
+        # 【修改】主要顯示內容變更為 correct_phrase
+        phrase = point['correct_phrase']
+        
+        # 為了排版，如果片語太長，就截斷顯示
+        if len(phrase) > 45:
+            phrase = phrase[:42] + "..."
+
+        print(f"{mastery_str:<12} | {mistakes} | {corrects} | \"{phrase}\"")
+        # 【新增】在下一行用縮排顯示分類和核心觀念，更清晰
+        print(f"{'':<26}└ 分類: {point['category']} -> {point['subcategory']}")
+
+    print("-" * 80)
 
 
 def main():
