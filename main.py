@@ -5,14 +5,15 @@ import random
 import json
 import psycopg2 # 引入 PostgreSQL 驅動
 import psycopg2.extras # 引入用於字典 cursor 的額外功能
+from prompt_assets import EXAMPLE_SENTENCE_BANK # 【新增】引入我們的「彈藥庫」
 
 # --- 核心學習參數 (可調整) ---
+# 這兩個參數現在主要用於本地端測試，線上服務由 App 傳入為準
 SESSION_SIZE = 2
 REVIEW_RATIO = 0.5
 MONITOR_MODE = True
 
 # --- 資料庫設定與管理 ---
-# 從環境變數讀取 Render 提供的資料庫連接 URL
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
 try:
@@ -97,7 +98,6 @@ def add_mistake(question_data, user_answer, feedback_data):
         q_type = question_data.get('type', 'new')
         source_id = question_data.get('original_mistake_id')
         
-        # ... (決定 primary_error_category 的邏輯不變) ...
         primary_error_category = "翻譯正確"
         primary_error_subcategory = "無"
         error_analysis = feedback_data.get('error_analysis', [])
@@ -110,7 +110,6 @@ def add_mistake(question_data, user_answer, feedback_data):
                 primary_error_category = error_analysis[0].get('error_type', '分類錯誤')
                 primary_error_subcategory = error_analysis[0].get('error_subtype', '子分類錯誤')
 
-        # 使用 %s 作為參數佔位符
         cursor.execute(
             """
             INSERT INTO learning_events 
@@ -135,7 +134,6 @@ def add_mistake(question_data, user_answer, feedback_data):
                 if not category or not subcategory or not correct_phrase:
                     continue
 
-                # 使用 %s 作為參數佔位符
                 cursor.execute("SELECT id, mastery_level FROM knowledge_points WHERE correct_phrase = %s", (correct_phrase,))
                 point = cursor.fetchone()
                 severity_penalty = 0.5 if error.get('severity') == 'major' else 0.2
@@ -167,7 +165,7 @@ def add_mistake(question_data, user_answer, feedback_data):
     if not is_correct:
         print(f"\n(本句主要錯誤已歸檔：{primary_error_category} - {primary_error_subcategory})")
 
-# --- AI 功能函式 (這部分完全不需要修改，因為它們不直接操作資料庫) ---
+# --- AI 功能函式 ---
 try:
     client = openai.OpenAI()
 except openai.OpenAIError:
@@ -175,7 +173,9 @@ except openai.OpenAIError:
     exit()
 
 def generate_question_batch(weak_points_str, num_review):
-    # ... (此函式內容維持原樣)
+    """
+    (複習題) 此函式邏輯維持不變。
+    """
     system_prompt = f"""
             你是一位頂尖的英文教學專家與命題者，專門設計「精準打擊」的複習題。你的核心任務是根據下方一份關於學生的「具體知識點弱點報告」，為他量身打造 {num_review} 題翻譯考題。
 
@@ -199,7 +199,6 @@ def generate_question_batch(weak_points_str, num_review):
         請根據以上報告，為我生成 {num_review} 題能測驗出學生是否已經掌握這些「正確用法」的翻譯題。
         請務必記得，在輸出的 JSON 中，`new_sentence` 欄位的值必須是中文句子。
         """
-    # ... (後續的 try/except 邏輯維持原樣) ...
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -209,8 +208,7 @@ def generate_question_batch(weak_points_str, num_review):
             ],
             response_format={"type": "json_object"}
         )
-        response_content = response.choices[0].message.content
-        response_data = json.loads(response_content)
+        response_data = json.loads(response.choices[0].message.content)
         questions_list = []
         if isinstance(response_data, dict):
             for value in response_data.values():
@@ -224,27 +222,59 @@ def generate_question_batch(weak_points_str, num_review):
         print(f"AI 備課時發生錯誤 (有複習題): {e}")
         return None
 
-def generate_new_question_batch(num_new):
-    # ... (此函式內容維持原樣)
-    system_prompt = f"""
-    你是一位為台灣大學入學考試（學測）設計英文翻譯題的資深命題委員。你的任務是根據一份「句型文法書」，設計出 {num_new} 題全新的、具有挑戰性的翻譯考題。
-
-    **你的核心工作原則：**
-    1.  **權威教材**：「句型文法書」是你唯一的出題依據。
-    2.  **【重要指令】輸出格式**：你必須嚴格回傳一個 JSON 物件，其根部必須有一個名為 "questions" 的 key，其 value 是一個包含 {num_new} 個問題物件的列表。每個問題物件都必須有一個 `new_sentence` 的 key，其 value 是你設計的【中文】考題。
-    
-    範例格式:
-    {{
-        "questions": [
-            {{ "new_sentence": "直到深夜，這位科學家才意識到那個看似微不足道的實驗誤差，為他提供了關鍵線索。" }},
-            {{ "new_sentence": "現代社會中，我們再怎麼強調培養批判性思考能力的重要性也不為過。" }}
-        ]
-    }}
-    ---
-    **【句型文法書 (你的出題武器庫)】**
-    {translation_patterns}
+def generate_new_question_batch(num_new, difficulty, length):
     """
-    user_prompt = f"請給我 {num_new} 題全新的題目。請務必記得，在輸出的 JSON 中，`new_sentence` 欄位的值必須是中文句子。"
+    【v5.9 Token 優化版】: 使用分級例句庫和句型取樣，生成高度客製化且節省 Token 的 Prompt。
+    """
+    # 1. 從文法書中隨機取樣，而不是傳送全部內容
+    try:
+        # 移除開頭的標題行，並過濾掉空行
+        patterns_list = [p.strip() for p in translation_patterns.split('* ') if p.strip()]
+        # 隨機選取 15 個句型作為本次出題的靈感來源
+        num_to_sample = min(len(patterns_list), 15)
+        sampled_patterns = random.sample(patterns_list, num_to_sample)
+        sampled_patterns_str = "* " + "\n* ".join(sampled_patterns)
+    except Exception as e:
+        print(f"文法書取樣失敗: {e}")
+        sampled_patterns_str = "（文法書取樣失敗）"
+
+    # 2. 根據 App 傳來的參數，選取對應的例句
+    # 提供一個安全的預設值，以防傳入的參數無效
+    example_sentences = EXAMPLE_SENTENCE_BANK.get(length, EXAMPLE_SENTENCE_BANK['medium']) \
+                                             .get(str(difficulty), EXAMPLE_SENTENCE_BANK['medium']['3'])
+    example_sentences_str = "\n".join([f"- {s}" for s in example_sentences])
+
+    # 3. 組裝全新的、精簡的 Prompt
+    system_prompt = f"""
+    你是一位超級高效的英文命題 AI。你的任務是嚴格遵循以下三項指令，為我生成 {num_new} 題翻譯考題。
+
+    **指令一：模仿風格**
+    你必須深度學習下方的「風格參考範例」，你的出題用字、句式複雜度和主題，都必須與這些範例的風格完全一致。
+    ---
+    【風格參考範例 (來自難度 {difficulty} / 長度 {length})】
+    {example_sentences_str}
+    ---
+
+    **指令二：運用句型**
+    在出題時，你必須從下方的「指定句型庫」中，選擇合適的句型融入到你的題目裡。
+    ---
+    【指定句型庫 (本次隨機抽取)】
+    {sampled_patterns_str}
+    ---
+
+    **指令三：嚴格輸出**
+    你必須嚴格回傳一個 JSON 物件，其根部必須有一個名為 "questions" 的 key，其 value 是包含 {num_new} 個問題物件的列表。
+    """
+    user_prompt = f"請嚴格遵照你的三項核心指令，為我生成 {num_new} 題考題。"
+
+    if MONITOR_MODE:
+        print("\n" + "="*20 + " AI 備課 (Token 優化版) INPUT " + "="*20)
+        print("--- SYSTEM PROMPT ---")
+        print(system_prompt)
+        print("\n--- USER PROMPT ---")
+        print(user_prompt)
+        print("="*70 + "\n")
+        
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -254,8 +284,9 @@ def generate_new_question_batch(num_new):
             ],
             response_format={"type": "json_object"}
         )
-        response_content = response.choices[0].message.content
-        response_data = json.loads(response_content)
+        
+        response_data = json.loads(response.choices[0].message.content)
+        
         questions_list = []
         if isinstance(response_data, dict):
             for value in response_data.values():
@@ -264,13 +295,16 @@ def generate_new_question_batch(num_new):
                     break
         elif isinstance(response_data, list):
             questions_list = response_data
+        
         return questions_list
     except Exception as e:
-        print(f"AI 備課時發生錯誤 (無複習題): {e}")
+        print(f"AI 備課時發生錯誤 (Token 優化版): {e}")
         return None
 
 def get_tutor_feedback(chinese_sentence, user_translation):
-    # ... (此函式內容維持原樣)
+    """
+    此函式邏輯維持不變。
+    """
     system_prompt = f"""
     你是一位極其細心、專業且有耐心的英文家教。你的任務是像批改作業一樣，逐字逐句分析學生從中文翻譯到英文的答案，並回傳一份結構化的 JSON 分析報告。
 
@@ -305,7 +339,6 @@ def get_tutor_feedback(chinese_sentence, user_translation):
     except Exception as e:
         print(f"AI 批改時發生錯誤: {e}")
         return {}
-
 
 def update_knowledge_point_mastery(point_id, current_mastery):
     """
@@ -352,8 +385,7 @@ def get_due_knowledge_points(limit):
 
 def start_dynamic_session():
     """
-    v5.0 版更新：圍繞「知識點」來建構整個學習流程。
-    【v5.4 PostgreSQL 版】: 資料庫操作已全面更新。
+    本地端測試用的函式。
     """
     print(f"\n--- 🚀 準備開始新的一輪學習 (共 {SESSION_SIZE} 題) ---")
 
@@ -384,7 +416,8 @@ def start_dynamic_session():
 
     if num_new_questions > 0:
         print(f"正在為您準備 {num_new_questions} 個全新挑戰...")
-        new_questions = generate_new_question_batch(num_new_questions)
+        # 【修改】為了讓本地測試能順利運行，此處提供一組預設的難度和長度參數
+        new_questions = generate_new_question_batch(num_new_questions, difficulty=3, length='medium')
         if new_questions:
             for q in new_questions:
                 if isinstance(q, dict):
@@ -430,7 +463,6 @@ def main():
     """
     主執行函式，用於本地端測試。
     """
-    # 首次執行時初始化資料庫
     if DATABASE_URL:
         init_db()
     else:
@@ -438,20 +470,18 @@ def main():
         return
 
     while True:
-        print("\n--- 🌟 動態 AI 英文家教 (v5.4) 🌟 ---")
-        print("1. 開始一輪智慧學習")
-        print("2. （功能待開發：查看儀表板）")
-        print("3. 結束程式")
-        choice = input("請輸入你的選擇 (1/3): ")
+        print("\n--- 🌟 動態 AI 英文家教 (v5.9) 🌟 ---")
+        print("1. 開始一輪智慧學習 (本地測試)")
+        print("2. 結束程式")
+        choice = input("請輸入你的選擇 (1/2): ")
 
         if choice == '1':
             start_dynamic_session()
-        elif choice == '3':
+        elif choice == '2':
             print("\n掰掰，下次見！👋")
             break
         else:
             print("\n無效的輸入，請重新輸入。")
 
 if __name__ == '__main__':
-    # 這部分主要用於本地端測試，Render 部署時不會執行
     main()

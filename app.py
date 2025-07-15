@@ -30,27 +30,31 @@ def index():
     """
     return "<h1>AI Tutor API (v5.4 PostgreSQL) is running!</h1><p>請使用 /start_session, /submit_answer, /get_dashboard, /get_flashcards 端點。</p>"
 
+# 位於 app.py
+
 # --- API 端點 1: 開始一輪新的學習 ---
 @app.route("/start_session", methods=['GET'])
 def start_session_endpoint():
     """
-    【v5.8 最終修正】: 移除題數補位邏輯，嚴格遵守 App 請求的各類型題數。
+    【v5.9 Token 優化版】: 接收難度與長度參數，並傳遞給新的生成函式。
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
     
     try:
+        # 從 App 請求中獲取所有參數
         desired_review_count = int(request.args.get('num_review', '3'))
         desired_new_count = int(request.args.get('num_new', '2'))
+        difficulty = int(request.args.get('difficulty', '3'))
+        length = request.args.get('length', 'medium')
     except ValueError:
-        desired_review_count = 3
-        desired_new_count = 2
+        # 如果參數格式錯誤，使用安全的預設值
+        desired_review_count, desired_new_count, difficulty, length = 3, 2, 3, 'medium'
 
-    print(f"[API] App 要求生成 {desired_review_count} 題複習題和 {desired_new_count} 題新題目。")
+    print(f"[API] App 請求參數: 複習={desired_review_count}, 全新={desired_new_count}, 難度={difficulty}, 長度={length}")
     
     questions_to_ask = []
 
-    # 1. 產生複習題
-    # 只有在使用者確實想要複習題時，才去資料庫查詢
+    # 1. 產生複習題 (邏輯維持不變)
     if desired_review_count > 0:
         due_knowledge_points = tutor.get_due_knowledge_points(desired_review_count)
         actual_num_review = len(due_knowledge_points)
@@ -72,20 +76,19 @@ def start_session_endpoint():
                 questions_to_ask.extend(review_questions)
 
     # 2. 產生新題目
-    # 【核心修正】: 直接使用 App 請求的 desired_new_count，不再計算
     if desired_new_count > 0:
         print(f"[API] 準備生成 {desired_new_count} 個全新挑戰...")
-        new_questions = tutor.generate_new_question_batch(desired_new_count)
+        # 【核心修改】: 呼叫新版函式，並傳入新的參數
+        new_questions = tutor.generate_new_question_batch(desired_new_count, difficulty, length)
         if new_questions:
             for q in new_questions:
                  if isinstance(q, dict):
                     q['type'] = 'new'
             questions_to_ask.extend(new_questions)
     
-    # 這個判斷現在只會在 AI 真的備課失敗，或使用者請求 (0,0) 時觸發
+    # 處理無題目可學的狀況
     if not questions_to_ask:
         print("[API] 本次請求無題目生成。")
-        # 回傳一個合法的空列表，讓 App 可以正常處理
         return jsonify({"questions": []})
         
     tutor.random.shuffle(questions_to_ask)
