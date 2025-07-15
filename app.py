@@ -31,30 +31,42 @@ def index():
     return "<h1>AI Tutor API (v5.4 PostgreSQL) is running!</h1><p>請使用 /start_session, /submit_answer, /get_dashboard, /get_flashcards 端點。</p>"
 
 
+# 位於 app.py
+
 # --- API 端點 1: 開始一輪新的學習 ---
 @app.route("/start_session", methods=['GET'])
 def start_session_endpoint():
     """
-    iOS App 從這裡獲取新一輪的題目。
-    【v5.4 PostgreSQL 版】: 此函式邏輯不變，因為它不直接操作資料庫。
+    【v5.5 客製化修改】: 不再使用後端寫死的設定，而是從 App 的請求參數中動態獲取題目數量。
+    範例請求: /start_session?num_review=3&num_new=2
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
-    session_size = tutor.SESSION_SIZE
-    num_review_questions = int(session_size * tutor.REVIEW_RATIO)
+    
+    # 從請求的 URL 查詢參數中獲取數值，如果 App 未提供，則使用預設值
+    try:
+        num_review_questions = int(request.args.get('num_review', '3'))
+        num_new_questions = int(request.args.get('num_new', '2'))
+    except ValueError:
+        # 如果傳入的不是數字，則使用安全的預設值
+        num_review_questions = 3
+        num_new_questions = 2
+
+    print(f"[API] App 要求生成 {num_review_questions} 題複習題和 {num_new_questions} 題新題目。")
+
+    # 原本的邏輯幾乎可以完全重用，只是變數來源不同
     due_knowledge_points = tutor.get_due_knowledge_points(num_review_questions)
     actual_num_review = len(due_knowledge_points)
-    num_new_questions = session_size - actual_num_review
     
     questions_to_ask = []
-    print(f"[API] 準備生成 {actual_num_review} 題複習題和 {num_new_questions} 題新題目。")
 
     if actual_num_review > 0:
-        # v5.2 之後的精準打擊 prompt 格式
         weak_points_for_prompt = [
             f"- 錯誤分類: {p['category']} -> {p['subcategory']}\n  正確用法: \"{p['correct_phrase']}\"\n  核心觀念: {p['explanation']}"
             for p in due_knowledge_points
         ]
         weak_points_str = "\n\n".join(weak_points_for_prompt)
+        print(f"正在針對您以下的 {actual_num_review} 個具體弱點設計考題：\n{weak_points_str}")
+        
         review_questions = tutor.generate_question_batch(weak_points_str, actual_num_review)
         if review_questions:
             for q, point in zip(review_questions, due_knowledge_points):
@@ -65,6 +77,7 @@ def start_session_endpoint():
             questions_to_ask.extend(review_questions)
 
     if num_new_questions > 0:
+        print(f"正在為您準備 {num_new_questions} 個全新挑戰...")
         new_questions = tutor.generate_new_question_batch(num_new_questions)
         if new_questions:
             for q in new_questions:
@@ -79,7 +92,6 @@ def start_session_endpoint():
     tutor.random.shuffle(questions_to_ask)
     print(f"[API] 已成功生成 {len(questions_to_ask)} 題，準備回傳給 App。")
     return jsonify({"questions": questions_to_ask})
-
 
 # --- API 端點 2: 提交答案並獲取批改回饋 ---
 @app.route("/submit_answer", methods=['POST'])
