@@ -245,6 +245,33 @@ def get_flashcards_endpoint():
         if conn:
             conn.close()
 
+# --- API 端點 5: 獲取學習日曆熱力圖數據 (新功能) ---
+@app.route("/get_calendar_heatmap", methods=['GET'])
+def get_calendar_heatmap_endpoint():
+    """
+    【v5.11 新增】: 提供特定月份的每日學習題數，用於繪製熱力圖。
+    範例請求: /get_calendar_heatmap?year=2025&month=7
+    """
+    print("\n[API] 收到請求：獲取學習日曆熱力圖數據...")
+    try:
+        # 從 App 請求中獲取年份和月份，若無則使用當前伺服器時間
+        current_time = datetime.datetime.now(datetime.timezone.utc)
+        year = int(request.args.get('year', current_time.year))
+        month = int(request.args.get('month', current_time.month))
+    except ValueError:
+        # 如果傳入無效參數，使用安全的預設值
+        current_time = datetime.datetime.now(datetime.timezone.utc)
+        year = current_time.year
+        month = current_time.month
+    
+    print(f"[API] 正在查詢 {year} 年 {month} 月的數據...")
+    
+    try:
+        heatmap_data = tutor.get_daily_activity(year, month)
+        return jsonify({"heatmap_data": heatmap_data})
+    except Exception as e:
+        print(f"[API] 查詢熱力圖數據時發生錯誤: {e}")
+        return jsonify({"error": str(e)}), 500
 
 # --- 運行伺服器 ---
 if __name__ == '__main__':

@@ -540,5 +540,38 @@ def main():
         else:
             print("\n無效的輸入，請重新輸入。")
 
+
+def get_daily_activity(year, month):
+    """
+    【v5.11 新增】: 查詢特定月份的每日學習活動數量。
+    """
+    conn = get_db_connection()
+    # 使用 DictCursor 讓回傳的結果可以用欄位名稱存取
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        # 使用 PostgreSQL 的 date_trunc 函式來按天分組，並計算每天的紀錄數量
+        # TIMESTAMPTZ 'epoch' 可以將時間戳轉換為 Unix 時間，方便處理
+        # 我們只查詢 'timestamp' 欄位，並將其轉換為伺服器所在時區的日期
+        query = """
+        SELECT
+            DATE_TRUNC('day', timestamp AT TIME ZONE 'UTC')::date AS activity_date,
+            COUNT(id) AS activity_count
+        FROM
+            learning_events
+        WHERE
+            EXTRACT(YEAR FROM timestamp AT TIME ZONE 'UTC') = %s AND
+            EXTRACT(MONTH FROM timestamp AT TIME ZONE 'UTC') = %s
+        GROUP BY
+            activity_date
+        ORDER BY
+            activity_date;
+        """
+        cursor.execute(query, (year, month))
+        activities = cursor.fetchall()
+    conn.close()
+    
+    # 將查詢結果轉換為 App 更易於使用的 { "YYYY-MM-DD": count } 格式
+    heatmap_data = {activity['activity_date'].isoformat(): activity['activity_count'] for activity in activities}
+    return heatmap_data
+
 if __name__ == '__main__':
     main()
