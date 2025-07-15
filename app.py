@@ -105,6 +105,46 @@ def submit_answer_endpoint():
     # 4. 將完整的批改回饋回傳給 App
     return jsonify(feedback_data)
 
+# --- API 端點 3: 獲取知識點儀表板數據 (新功能) ---
+@app.route("/get_dashboard", methods=['GET'])
+def get_dashboard_endpoint():
+    """
+    提供知識點儀表板所需的數據。
+    它會連接資料庫，查詢所有知識點的掌握度，並以 JSON 格式回傳。
+    """
+    print("\n[API] 收到請求：獲取知識點儀表板數據...")
+    
+    conn = None
+    try:
+        # 連接到資料庫
+        conn = tutor.sqlite3.connect(tutor.DATABASE_FILE)
+        conn.row_factory = tutor.sqlite3.Row # 讓回傳的結果可以用欄位名稱存取
+        cursor = conn.cursor()
+
+        # 執行查詢，與 view_log.py 中的邏輯相同
+        cursor.execute("""
+            SELECT category, subcategory, mastery_level, mistake_count, correct_count 
+            FROM knowledge_points 
+            ORDER BY mastery_level ASC, mistake_count DESC
+        """)
+        points_raw = cursor.fetchall()
+        
+        # 將資料庫回傳的 sqlite3.Row 物件轉換成標準的 Python 字典列表
+        points_dict = [dict(row) for row in points_raw]
+
+        print(f"[API] 成功查詢到 {len(points_dict)} 個知識點數據。")
+        
+        # 使用 jsonify 將字典列表轉換成 JSON 回應
+        return jsonify({"knowledge_points": points_dict})
+
+    except Exception as e:
+        print(f"[API] 獲取儀表板數據時發生錯誤: {e}")
+        # 如果發生錯誤，回傳一個包含錯誤訊息的 JSON
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
 
 # --- 運行伺服器 ---
 if __name__ == '__main__':
