@@ -158,24 +158,40 @@ def submit_answer_endpoint():
 @app.route("/get_dashboard", methods=['GET'])
 def get_dashboard_endpoint():
     """
-    【v5.12 改造】: 在回傳給 App 的資料中，加入 key_point_summary。
+    【v5.14 改造】: 在回傳給 App 的資料中，加入 next_review_date。
     """
     print("\n[API] 收到請求：獲取知識點儀表板數據...")
     conn = None
     try:
         conn = tutor.get_db_connection()
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # 【核心修改處】: 在 SELECT 語句中加入 next_review_date
             cursor.execute("""
                 SELECT 
-                    category, subcategory, correct_phrase, explanation, 
-                    user_context_sentence, incorrect_phrase_in_context, 
+                    category, 
+                    subcategory, 
+                    correct_phrase, 
+                    explanation, 
+                    user_context_sentence, 
+                    incorrect_phrase_in_context, 
                     key_point_summary,
-                    mastery_level, mistake_count, correct_count 
+                    mastery_level, 
+                    mistake_count, 
+                    correct_count,
+                    next_review_date 
                 FROM knowledge_points 
                 ORDER BY mastery_level ASC, mistake_count DESC
             """)
             points_raw = cursor.fetchall()
-        points_dict = [dict(row) for row in points_raw]
+        
+        # psycopg2 會自動處理 Date 物件，但為了確保 JSON 相容性，我們手動轉為字串
+        points_dict = []
+        for row in points_raw:
+            row_dict = dict(row)
+            if row_dict.get('next_review_date'):
+                row_dict['next_review_date'] = row_dict['next_review_date'].isoformat()
+            points_dict.append(row_dict)
+            
         return jsonify({"knowledge_points": points_dict})
     except Exception as e:
         print(f"[API] 獲取儀表板數據時發生嚴重錯誤: {e}")
