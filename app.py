@@ -289,6 +289,28 @@ def get_calendar_heatmap_endpoint():
         print(f"[API] 查詢熱力圖數據時發生錯誤: {e}")
         return jsonify({"error": str(e)}), 500
 
+@app.route("/get_daily_details", methods=['GET'])
+def get_daily_details_endpoint():
+    """
+    【v5.15 新增】: 提供特定日期的學習詳情。
+    範例請求: /get_daily_details?date=2025-07-16
+    """
+    print("\n[API] 收到請求：獲取單日學習詳情...")
+    # 從請求中獲取日期字串
+    date_str = request.args.get('date')
+    if not date_str:
+        return jsonify({"error": "請提供日期參數 (date=YYYY-MM-DD)。"}), 400
+    
+    print(f"[API] 正在查詢日期 {date_str} 的詳情...")
+    
+    try:
+        # 呼叫 main.py 中的新函式來獲取數據
+        daily_details = tutor.get_daily_details(date_str)
+        return jsonify(daily_details)
+    except Exception as e:
+        print(f"[API] 查詢單日詳情時發生錯誤: {e}")
+        return jsonify({"error": str(e)}), 500
+
 # --- 運行伺服器 ---
 if __name__ == '__main__':
     # 確保您已經設定了 OPENAI_API_KEY 環境變數
