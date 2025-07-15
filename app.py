@@ -30,14 +30,11 @@ def index():
     """
     return "<h1>AI Tutor API (v5.4 PostgreSQL) is running!</h1><p>請使用 /start_session, /submit_answer, /get_dashboard, /get_flashcards 端點。</p>"
 
-
-# 位於 app.py
-
 # --- API 端點 1: 開始一輪新的學習 ---
 @app.route("/start_session", methods=['GET'])
 def start_session_endpoint():
     """
-    【v5.6 智慧調整題數】: 根據實際可複習的題目數量，動態調整新題數，以滿足使用者期望的總題數。
+    【v5.8 最終修正】: 移除題數補位邏輯，嚴格遵守 App 請求的各類型題數。
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
     
@@ -48,49 +45,48 @@ def start_session_endpoint():
         desired_review_count = 3
         desired_new_count = 2
 
-    # 1. 計算期望的總題數
-    total_desired_questions = desired_review_count + desired_new_count
-    print(f"[API] App 期望總題數: {total_desired_questions} (複習: {desired_review_count}, 全新: {desired_new_count})")
-
-    # 2. 盡力獲取到期的複習題
-    due_knowledge_points = tutor.get_due_knowledge_points(desired_review_count)
-    actual_num_review = len(due_knowledge_points)
-    print(f"[API] 從資料庫中找到 {actual_num_review} 題到期的複習題。")
+    print(f"[API] App 要求生成 {desired_review_count} 題複習題和 {desired_new_count} 題新題目。")
     
-    # 3. 【核心邏輯】用新題目補滿剩下的空缺
-    num_new_to_generate = total_desired_questions - actual_num_review
-    print(f"[API] 準備生成 {actual_num_review} 題複習題和 {num_new_to_generate} 題新題目。")
-
     questions_to_ask = []
 
-    # 產生複習題 (邏輯不變)
-    if actual_num_review > 0:
-        weak_points_for_prompt = [
-            f"- 錯誤分類: {p['category']} -> {p['subcategory']}\n  正確用法: \"{p['correct_phrase']}\"\n  核心觀念: {p['explanation']}"
-            for p in due_knowledge_points
-        ]
-        weak_points_str = "\n\n".join(weak_points_for_prompt)
-        review_questions = tutor.generate_question_batch(weak_points_str, actual_num_review)
-        if review_questions:
-            for q, point in zip(review_questions, due_knowledge_points):
-                if isinstance(q, dict):
-                    q['type'] = 'review'
-                    q['knowledge_point_id'] = point['id']
-                    q['mastery_level'] = point['mastery_level']
-            questions_to_ask.extend(review_questions)
+    # 1. 產生複習題
+    # 只有在使用者確實想要複習題時，才去資料庫查詢
+    if desired_review_count > 0:
+        due_knowledge_points = tutor.get_due_knowledge_points(desired_review_count)
+        actual_num_review = len(due_knowledge_points)
+        print(f"[API] 從資料庫中找到 {actual_num_review} 題到期的複習題。")
+        
+        if actual_num_review > 0:
+            weak_points_for_prompt = [
+                f"- 錯誤分類: {p['category']} -> {p['subcategory']}\n  正確用法: \"{p['correct_phrase']}\"\n  核心觀念: {p['explanation']}"
+                for p in due_knowledge_points
+            ]
+            weak_points_str = "\n\n".join(weak_points_for_prompt)
+            review_questions = tutor.generate_question_batch(weak_points_str, actual_num_review)
+            if review_questions:
+                for q, point in zip(review_questions, due_knowledge_points):
+                    if isinstance(q, dict):
+                        q['type'] = 'review'
+                        q['knowledge_point_id'] = point['id']
+                        q['mastery_level'] = point['mastery_level']
+                questions_to_ask.extend(review_questions)
 
-    # 產生新題目 (使用計算後的新數量)
-    if num_new_to_generate > 0:
-        new_questions = tutor.generate_new_question_batch(num_new_to_generate)
+    # 2. 產生新題目
+    # 【核心修正】: 直接使用 App 請求的 desired_new_count，不再計算
+    if desired_new_count > 0:
+        print(f"[API] 準備生成 {desired_new_count} 個全新挑戰...")
+        new_questions = tutor.generate_new_question_batch(desired_new_count)
         if new_questions:
             for q in new_questions:
                  if isinstance(q, dict):
                     q['type'] = 'new'
             questions_to_ask.extend(new_questions)
     
+    # 這個判斷現在只會在 AI 真的備課失敗，或使用者請求 (0,0) 時觸發
     if not questions_to_ask:
-        print("[API] AI 備課失敗或無題目可學。")
-        return jsonify({"error": "AI備課失敗，無法生成題目。"}), 500
+        print("[API] 本次請求無題目生成。")
+        # 回傳一個合法的空列表，讓 App 可以正常處理
+        return jsonify({"questions": []})
         
     tutor.random.shuffle(questions_to_ask)
     print(f"[API] 已成功生成 {len(questions_to_ask)} 題，準備回傳給 App。")
