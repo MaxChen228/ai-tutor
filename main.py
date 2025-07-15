@@ -85,10 +85,10 @@ def init_db():
     conn.close()
     print("資料庫表格已準備就緒。")
 
-def add_mistake(question_data, user_answer, feedback_data):
+def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
     """
-    【v5.4 PostgreSQL 版】: 將學習事件和知識點弱點存入 PostgreSQL。
-    參數風格從 '?' 改為 '%s'。
+    【v5.10 改造】: 增加 exclude_phrase 參數。
+    如果提供了此參數，則在記錄新錯誤時，會忽略掉與之相符的知識點，避免重複懲罰。
     """
     conn = get_db_connection()
     with conn.cursor() as cursor:
@@ -122,6 +122,7 @@ def add_mistake(question_data, user_answer, feedback_data):
             feedback_json, datetime.datetime.now(datetime.timezone.utc))
         )
         
+        # 只有在句子整體不正確時，才進入此迴圈記錄新錯誤
         if not is_correct and error_analysis:
             print("\n正在更新您的具體知識點弱點分析...")
             for error in error_analysis:
@@ -132,6 +133,11 @@ def add_mistake(question_data, user_answer, feedback_data):
                 incorrect_phrase = error.get('original_phrase')
                 
                 if not category or not subcategory or not correct_phrase:
+                    continue
+
+                # 如果當前錯誤的「正確片語」是被指定要忽略的，則跳過此迴圈
+                if exclude_phrase and correct_phrase == exclude_phrase:
+                    print(f"  - (忽略已處理的複習點: {exclude_phrase})")
                     continue
 
                 cursor.execute("SELECT id, mastery_level FROM knowledge_points WHERE correct_phrase = %s", (correct_phrase,))
@@ -307,11 +313,13 @@ def generate_new_question_batch(num_new, difficulty, length):
         print(f"AI 備課時發生錯誤 (Token 優化版): {e}")
         return None
     
-def get_tutor_feedback(chinese_sentence, user_translation):
+def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
     """
-    此函式邏輯維持不變。
+    【v5.10 改造】: 引入 review_context，實現「目標導向批改」。
+    如果提供了 review_context，會要求 AI 額外判斷該核心觀念是否被掌握。
     """
-    system_prompt = f"""
+    # 基礎的 prompt，用於新題目
+    base_system_prompt = f"""
     你是一位極其細心、專業且有耐心的英文家教。你的任務是像批改作業一樣，逐字逐句分析學生從中文翻譯到英文的答案，並回傳一份結構化的 JSON 分析報告。
 
     **【重要指令】輸出格式**
@@ -330,7 +338,37 @@ def get_tutor_feedback(chinese_sentence, user_translation):
 
     **原始中文句子是**："{chinese_sentence}"
     """
+    
+    # 根據有無 review_context，動態生成不同的 prompt
+    if review_context:
+        # 這是複習題的「目標導向」prompt
+        system_prompt = f"""
+        你是一位頂尖的英文教學專家，正在為一名學生進行「核心觀念」的複習驗收。
+
+        **你的首要任務：**
+        學生的本次作答，是為了測驗他是否已經掌握了以下這個核心觀念：
+        - **核心複習觀念: "{review_context}"**
+
+        請在你的 JSON 回覆中，務必包含一個名為 `did_master_review_concept` 的布林值欄位，用來明確回答「學生的翻譯是否正確地應用了上述的核心複習觀念？」。即使學生的句子中有其他拼寫或文法錯誤，只要他對這個核心觀念的運用是正確的，此欄位就應為 `true`。
+
+        **你的次要任務：**
+        在完成首要任務後，請對學生的整個句子進行常規的錯誤分析，並將結果填入 `error_analysis` 列表中。
+
+        **【重要指令】輸出格式**
+        你的 JSON 回覆必須包含以下所有欄位：
+        1.  `did_master_review_concept`: (boolean) 學生是否掌握了本次的核心複習觀念。
+        2.  `is_generally_correct`: (boolean) 綜合判斷，學生的句子整體是否大致正確。
+        3.  `overall_suggestion`: (string) 提供整體最流暢的翻譯建議。
+        4.  `error_analysis`: (array of objects) 其他所有錯誤的分析列表。
+
+        **原始中文句子是**："{chinese_sentence}"
+        """
+    else:
+        # 這是新題目的常規 prompt
+        system_prompt = base_system_prompt
+
     user_prompt = f"這是我的翻譯：「{user_translation}」。請根據你的專業知識和上述指令，為我生成一份鉅細靡遺的 JSON 分析報告。"
+
     try:
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -344,7 +382,20 @@ def get_tutor_feedback(chinese_sentence, user_translation):
         return feedback_data
     except Exception as e:
         print(f"AI 批改時發生錯誤: {e}")
-        return {}
+        # 確保錯誤回傳時，包含 did_master_review_concept 欄位
+        return {
+            "did_master_review_concept": False,
+            "is_generally_correct": False,
+            "overall_suggestion": "N/A",
+            "error_analysis": [{
+                "error_type": "系統錯誤",
+                "error_subtype": "AI 回覆格式錯誤",
+                "original_phrase": "N/A",
+                "correction": "N/A",
+                "explanation": f"系統無法處理 AI 的回覆：{e}",
+                "severity": "major"
+            }]
+        }
 
 def update_knowledge_point_mastery(point_id, current_mastery):
     """

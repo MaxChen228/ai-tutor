@@ -99,8 +99,7 @@ def start_session_endpoint():
 @app.route("/submit_answer", methods=['POST'])
 def submit_answer_endpoint():
     """
-    iOS App 將使用者作答的內容傳到這裡來批改。
-    【v5.4 PostgreSQL 版】: 此函式邏輯不變，因為它不直接操作資料庫。
+    【v5.10 改造】: 實現「目標導向」的複習與錯誤記錄流程。
     """
     print("\n[API] 收到請求：批改使用者答案...")
     data = request.get_json()
@@ -114,14 +113,42 @@ def submit_answer_endpoint():
         return jsonify({"error": "請求資料不完整，需要 'question_data' 和 'user_answer'。"}), 400
 
     sentence = question_data.get('new_sentence', '（題目獲取失敗）')
-    feedback_data = tutor.get_tutor_feedback(sentence, user_answer)
-    tutor.add_mistake(question_data, user_answer, feedback_data)
 
-    if question_data.get('type') == 'review' and feedback_data.get('is_generally_correct'):
+    feedback_data = {}
+    review_concept_to_check = None
+
+    # 判斷是否為複習題，並預先從資料庫取出要檢查的核心觀念
+    if question_data.get('type') == 'review':
+        conn = tutor.get_db_connection()
+        with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+            # 確保傳入的 ID 是整數
+            try:
+                point_id_to_check = int(question_data.get('knowledge_point_id'))
+                cursor.execute("SELECT correct_phrase FROM knowledge_points WHERE id = %s", (point_id_to_check,))
+                result = cursor.fetchone()
+                if result:
+                    review_concept_to_check = result['correct_phrase']
+            except (TypeError, ValueError):
+                print(f"[API] 警告：收到的 knowledge_point_id 無效。")
+                pass # 如果 ID 無效，則當作新題目處理
+        conn.close()
+
+    # 呼叫改造後的批改函式，如果 review_concept_to_check 有值，就會啟用「目標導向批改」
+    feedback_data = tutor.get_tutor_feedback(sentence, user_answer, review_context=review_concept_to_check)
+
+    # 全新的「雙重檢查」判斷流程
+    # 1. 首先，專門處理「核心複習觀念」是否掌握
+    if review_concept_to_check and feedback_data.get('did_master_review_concept'):
+        print(f"[API] 核心觀念 '{review_concept_to_check}' 複習成功！")
         point_id = question_data.get('knowledge_point_id')
         mastery = question_data.get('mastery_level')
         if point_id is not None and mastery is not None:
+            # 即使句子有其他錯誤，只要核心觀念對了，就給予獎勵
             tutor.update_knowledge_point_mastery(point_id, mastery)
+    
+    # 2. 然後，獨立地處理句子中「其他」的錯誤
+    # 我們將已處理過的複習觀念傳入，避免重複懲罰
+    tutor.add_mistake(question_data, user_answer, feedback_data, exclude_phrase=review_concept_to_check)
     
     return jsonify(feedback_data)
 
