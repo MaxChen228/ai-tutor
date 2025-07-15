@@ -1,5 +1,6 @@
 # app.py - 您的 AI 家教後端 API 伺服器
 import os
+import json # 確保在檔案頂部 import json
 from flask import Flask, request, jsonify
 import main as tutor  # 我們將 main.py 引用並取名為 tutor，方便呼叫
 
@@ -8,10 +9,18 @@ app = Flask(__name__)
 app.config['JSON_AS_ASCII'] = False # 讓回傳的 JSON 可以正確顯示中文
 
 # --- 應用程式啟動時，初始化資料庫 ---
-# 確保資料庫表格都已經建立
 print("正在初始化資料庫...")
 tutor.init_db()
 print("資料庫準備就緒。")
+
+
+# --- API 端點 0: 根目錄歡迎頁面 (可選) ---
+@app.route("/", methods=['GET'])
+def index():
+    """
+    提供一個簡單的歡迎訊息，避免直接訪問根目錄時出現 404 錯誤。
+    """
+    return "<h1>AI Tutor API is running!</h1><p>請使用 /start_session, /submit_answer, /get_dashboard, /get_flashcards 端點。</p>"
 
 
 # --- API 端點 1: 開始一輪新的學習 ---
@@ -19,14 +28,9 @@ print("資料庫準備就緒。")
 def start_session_endpoint():
     """
     iOS App 從這裡獲取新一輪的題目。
-    可以直接用 GET 請求，也可以設計成 POST 來接收參數，例如 SESSION_SIZE。
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
-    
-    # 這裡我們先用 main.py 裡寫死的 SESSION_SIZE，未來可以從 request 裡讀取
     session_size = tutor.SESSION_SIZE
-
-    # --- 這段邏輯完全來自您的 start_dynamic_session 函式 ---
     num_review_questions = int(session_size * tutor.REVIEW_RATIO)
     due_knowledge_points = tutor.get_due_knowledge_points(num_review_questions)
     actual_num_review = len(due_knowledge_points)
@@ -41,16 +45,18 @@ def start_session_endpoint():
         review_questions = tutor.generate_question_batch(weak_points_str, actual_num_review)
         if review_questions:
             for q, point in zip(review_questions, due_knowledge_points):
-                q['type'] = 'review'
-                q['knowledge_point_id'] = point['id']
-                q['mastery_level'] = point['mastery_level']
+                if isinstance(q, dict):
+                    q['type'] = 'review'
+                    q['knowledge_point_id'] = point['id']
+                    q['mastery_level'] = point['mastery_level']
             questions_to_ask.extend(review_questions)
 
     if num_new_questions > 0:
         new_questions = tutor.generate_new_question_batch(num_new_questions)
         if new_questions:
             for q in new_questions:
-                q['type'] = 'new'
+                 if isinstance(q, dict):
+                    q['type'] = 'new'
             questions_to_ask.extend(new_questions)
     
     if not questions_to_ask:
@@ -59,9 +65,6 @@ def start_session_endpoint():
         
     tutor.random.shuffle(questions_to_ask)
     print(f"[API] 已成功生成 {len(questions_to_ask)} 題，準備回傳給 App。")
-    # --- 邏輯結束 ---
-
-    # 將題目列表以 JSON 格式回傳給 App
     return jsonify({"questions": questions_to_ask})
 
 
@@ -72,8 +75,6 @@ def submit_answer_endpoint():
     iOS App 將使用者作答的內容傳到這裡來批改。
     """
     print("\n[API] 收到請求：批改使用者答案...")
-    
-    # 從 App 傳來的 JSON 資料中獲取內容
     data = request.get_json()
     if not data:
         return jsonify({"error": "請求格式錯誤，需要 JSON 資料。"}), 400
@@ -85,61 +86,101 @@ def submit_answer_endpoint():
         return jsonify({"error": "請求資料不完整，需要 'question_data' 和 'user_answer'。"}), 400
 
     sentence = question_data.get('new_sentence', '（題目獲取失敗）')
-
-    # 1. 獲取 AI 批改回饋
     feedback_data = tutor.get_tutor_feedback(sentence, user_answer)
-    print(f"[API] 已獲取 AI 對 '{user_answer}' 的批改。")
-
-    # 2. 儲存學習紀錄並更新知識點 (此函式會處理答錯的情況)
     tutor.add_mistake(question_data, user_answer, feedback_data)
-    print(f"[API] 已儲存學習事件。")
 
-    # 3. 如果是「複習題」且「答對了」，更新知識點掌握度
     if question_data.get('type') == 'review' and feedback_data.get('is_generally_correct'):
         point_id = question_data.get('knowledge_point_id')
         mastery = question_data.get('mastery_level')
         if point_id is not None and mastery is not None:
             tutor.update_knowledge_point_mastery(point_id, mastery)
-            print(f"[API] 複習題答對，已更新知識點熟練度 (ID: {point_id})。")
-
-    # 4. 將完整的批改回饋回傳給 App
+    
     return jsonify(feedback_data)
 
-# --- API 端點 3: 獲取知識點儀表板數據 (新功能) ---
+
+# --- API 端點 3: 獲取知識點儀表板數據 ---
 @app.route("/get_dashboard", methods=['GET'])
 def get_dashboard_endpoint():
     """
     提供知識點儀表板所需的數據。
-    它會連接資料庫，查詢所有知識點的掌握度，並以 JSON 格式回傳。
     """
     print("\n[API] 收到請求：獲取知識點儀表板數據...")
-    
     conn = None
     try:
-        # 連接到資料庫
         conn = tutor.sqlite3.connect(tutor.DATABASE_FILE)
-        conn.row_factory = tutor.sqlite3.Row # 讓回傳的結果可以用欄位名稱存取
+        conn.row_factory = tutor.sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute("SELECT category, subcategory, mastery_level, mistake_count, correct_count FROM knowledge_points ORDER BY mastery_level ASC, mistake_count DESC")
+        points_raw = cursor.fetchall()
+        points_dict = [dict(row) for row in points_raw]
+        return jsonify({"knowledge_points": points_dict})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        if conn:
+            conn.close()
+
+
+# --- API 端點 4: 根據錯誤類型獲取單字卡數據 (新功能) ---
+@app.route("/get_flashcards", methods=['GET'])
+def get_flashcards_endpoint():
+    """
+    接收一個或多個 error_type 作為參數，
+    從資料庫中提取所有符合條件的錯誤，並格式化成單字卡列表回傳。
+    範例請求: /get_flashcards?types=慣用語不熟,介系詞搭配
+    """
+    print("\n[API] 收到請求：獲取單字卡數據...")
+    
+    # 從請求的 URL 中獲取使用者想複習的類型
+    types_str = request.args.get('types', '')
+    if not types_str:
+        return jsonify({"error": "請提供要查詢的錯誤類型(types)。"}), 400
+        
+    types_to_fetch = types_str.split(',')
+    print(f"[API] 準備查詢以下類型的單字卡: {types_to_fetch}")
+    
+    flashcards = []
+    unique_checker = set() # 用來避免加入完全重複的卡片
+    conn = None
+    try:
+        conn = tutor.sqlite3.connect(tutor.DATABASE_FILE)
         cursor = conn.cursor()
 
-        # 執行查詢，與 view_log.py 中的邏輯相同
-        cursor.execute("""
-            SELECT category, subcategory, mastery_level, mistake_count, correct_count 
-            FROM knowledge_points 
-            ORDER BY mastery_level ASC, mistake_count DESC
-        """)
-        points_raw = cursor.fetchall()
+        cursor.execute("SELECT ai_feedback_json FROM learning_events WHERE is_correct = 0")
+        all_events = cursor.fetchall()
         
-        # 將資料庫回傳的 sqlite3.Row 物件轉換成標準的 Python 字典列表
-        points_dict = [dict(row) for row in points_raw]
+        for event in all_events:
+            if not event[0]: continue
+            
+            feedback_data = json.loads(event[0])
+            error_analysis = feedback_data.get('error_analysis', [])
+            
+            for error in error_analysis:
+                error_type = error.get('error_type')
+                if error_type and error_type in types_to_fetch:
+                    card_front = error.get('original_phrase', 'N/A')
+                    card_back_correction = error.get('correction', 'N/A')
+                    
+                    # 建立一個唯一標識符，避免內容完全相同的卡片被重複加入
+                    card_identifier = (card_front, card_back_correction)
+                    if card_identifier in unique_checker:
+                        continue # 如果已經存在，則跳過
+                    
+                    unique_checker.add(card_identifier)
 
-        print(f"[API] 成功查詢到 {len(points_dict)} 個知識點數據。")
-        
-        # 使用 jsonify 將字典列表轉換成 JSON 回應
-        return jsonify({"knowledge_points": points_dict})
+                    card = {
+                        "front": card_front,
+                        "back_correction": card_back_correction,
+                        "back_explanation": error.get('explanation', 'N/A'),
+                        "category": error_type
+                    }
+                    flashcards.append(card)
+
+        print(f"[API] 成功提取到 {len(flashcards)} 張不重複的單字卡。")
+        return jsonify({"flashcards": flashcards})
 
     except Exception as e:
-        print(f"[API] 獲取儀表板數據時發生錯誤: {e}")
-        # 如果發生錯誤，回傳一個包含錯誤訊息的 JSON
+        print(f"[API] 獲取單字卡時發生錯誤: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
         if conn:
@@ -153,4 +194,5 @@ if __name__ == '__main__':
         print("錯誤：請先設定 OPENAI_API_KEY 環境變數！")
     else:
         # debug=True 讓您修改程式碼後伺服器會自動重啟，方便開發
+        # 當部署到 Render 時，它會使用 gunicorn，這個設定會被忽略
         app.run(debug=True, port=5000)
