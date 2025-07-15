@@ -222,15 +222,15 @@ def generate_question_batch(weak_points_str, num_review):
         print(f"AI 備課時發生錯誤 (有複習題): {e}")
         return None
 
+# 位於 main.py
+
 def generate_new_question_batch(num_new, difficulty, length):
     """
-    【v5.9 Token 優化版】: 使用分級例句庫和句型取樣，生成高度客製化且節省 Token 的 Prompt。
+    【v5.9.1 修正版】: 在 Prompt 中加入對 question 物件內部結構的嚴格規定。
     """
-    # 1. 從文法書中隨機取樣，而不是傳送全部內容
+    # ... (文法書取樣、例句選取的邏輯維持不變) ...
     try:
-        # 移除開頭的標題行，並過濾掉空行
         patterns_list = [p.strip() for p in translation_patterns.split('* ') if p.strip()]
-        # 隨機選取 15 個句型作為本次出題的靈感來源
         num_to_sample = min(len(patterns_list), 15)
         sampled_patterns = random.sample(patterns_list, num_to_sample)
         sampled_patterns_str = "* " + "\n* ".join(sampled_patterns)
@@ -238,13 +238,11 @@ def generate_new_question_batch(num_new, difficulty, length):
         print(f"文法書取樣失敗: {e}")
         sampled_patterns_str = "（文法書取樣失敗）"
 
-    # 2. 根據 App 傳來的參數，選取對應的例句
-    # 提供一個安全的預設值，以防傳入的參數無效
     example_sentences = EXAMPLE_SENTENCE_BANK.get(length, EXAMPLE_SENTENCE_BANK['medium']) \
                                              .get(str(difficulty), EXAMPLE_SENTENCE_BANK['medium']['3'])
     example_sentences_str = "\n".join([f"- {s}" for s in example_sentences])
 
-    # 3. 組裝全新的、精簡的 Prompt
+    # 【核心修改處】: 改造指令三，加入詳細的物件結構說明和範例
     system_prompt = f"""
     你是一位超級高效的英文命題 AI。你的任務是嚴格遵循以下三項指令，為我生成 {num_new} 題翻譯考題。
 
@@ -263,17 +261,27 @@ def generate_new_question_batch(num_new, difficulty, length):
     ---
 
     **指令三：嚴格輸出**
-    你必須嚴格回傳一個 JSON 物件，其根部必須有一個名為 "questions" 的 key，其 value 是包含 {num_new} 個問題物件的列表。
+    你必須嚴格回傳一個 JSON 物件。此物件的根部必須有一個名為 "questions" 的 key，其 value 是一個包含 {num_new} 個問題物件的列表。
+    **每一個問題物件都必須、且只能包含一個 key，名為 "new_sentence"**，其 value 為你設計的中文考題。
+
+    範例格式：
+    {{
+        "questions": [
+            {{ "new_sentence": "中文考題一..." }},
+            {{ "new_sentence": "中文考題二..." }}
+        ]
+    }}
     """
     user_prompt = f"請嚴格遵照你的三項核心指令，為我生成 {num_new} 題考題。"
 
+    # ... (後續的 MONITOR_MODE 和 try/except 邏輯維持不變) ...
     if MONITOR_MODE:
-        print("\n" + "="*20 + " AI 備課 (Token 優化版) INPUT " + "="*20)
+        print("\n" + "="*20 + " AI 備課 (Token 優化版 v2) INPUT " + "="*20)
         print("--- SYSTEM PROMPT ---")
         print(system_prompt)
         print("\n--- USER PROMPT ---")
         print(user_prompt)
-        print("="*70 + "\n")
+        print("="*75 + "\n")
         
     try:
         response = client.chat.completions.create(
@@ -284,9 +292,7 @@ def generate_new_question_batch(num_new, difficulty, length):
             ],
             response_format={"type": "json_object"}
         )
-        
         response_data = json.loads(response.choices[0].message.content)
-        
         questions_list = []
         if isinstance(response_data, dict):
             for value in response_data.values():
@@ -300,7 +306,7 @@ def generate_new_question_batch(num_new, difficulty, length):
     except Exception as e:
         print(f"AI 備課時發生錯誤 (Token 優化版): {e}")
         return None
-
+    
 def get_tutor_feedback(chinese_sentence, user_translation):
     """
     此函式邏輯維持不變。
