@@ -37,36 +37,39 @@ def index():
 @app.route("/start_session", methods=['GET'])
 def start_session_endpoint():
     """
-    【v5.5 客製化修改】: 不再使用後端寫死的設定，而是從 App 的請求參數中動態獲取題目數量。
-    範例請求: /start_session?num_review=3&num_new=2
+    【v5.6 智慧調整題數】: 根據實際可複習的題目數量，動態調整新題數，以滿足使用者期望的總題數。
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
     
-    # 從請求的 URL 查詢參數中獲取數值，如果 App 未提供，則使用預設值
     try:
-        num_review_questions = int(request.args.get('num_review', '3'))
-        num_new_questions = int(request.args.get('num_new', '2'))
+        desired_review_count = int(request.args.get('num_review', '3'))
+        desired_new_count = int(request.args.get('num_new', '2'))
     except ValueError:
-        # 如果傳入的不是數字，則使用安全的預設值
-        num_review_questions = 3
-        num_new_questions = 2
+        desired_review_count = 3
+        desired_new_count = 2
 
-    print(f"[API] App 要求生成 {num_review_questions} 題複習題和 {num_new_questions} 題新題目。")
+    # 1. 計算期望的總題數
+    total_desired_questions = desired_review_count + desired_new_count
+    print(f"[API] App 期望總題數: {total_desired_questions} (複習: {desired_review_count}, 全新: {desired_new_count})")
 
-    # 原本的邏輯幾乎可以完全重用，只是變數來源不同
-    due_knowledge_points = tutor.get_due_knowledge_points(num_review_questions)
+    # 2. 盡力獲取到期的複習題
+    due_knowledge_points = tutor.get_due_knowledge_points(desired_review_count)
     actual_num_review = len(due_knowledge_points)
+    print(f"[API] 從資料庫中找到 {actual_num_review} 題到期的複習題。")
     
+    # 3. 【核心邏輯】用新題目補滿剩下的空缺
+    num_new_to_generate = total_desired_questions - actual_num_review
+    print(f"[API] 準備生成 {actual_num_review} 題複習題和 {num_new_to_generate} 題新題目。")
+
     questions_to_ask = []
 
+    # 產生複習題 (邏輯不變)
     if actual_num_review > 0:
         weak_points_for_prompt = [
             f"- 錯誤分類: {p['category']} -> {p['subcategory']}\n  正確用法: \"{p['correct_phrase']}\"\n  核心觀念: {p['explanation']}"
             for p in due_knowledge_points
         ]
         weak_points_str = "\n\n".join(weak_points_for_prompt)
-        print(f"正在針對您以下的 {actual_num_review} 個具體弱點設計考題：\n{weak_points_str}")
-        
         review_questions = tutor.generate_question_batch(weak_points_str, actual_num_review)
         if review_questions:
             for q, point in zip(review_questions, due_knowledge_points):
@@ -76,9 +79,9 @@ def start_session_endpoint():
                     q['mastery_level'] = point['mastery_level']
             questions_to_ask.extend(review_questions)
 
-    if num_new_questions > 0:
-        print(f"正在為您準備 {num_new_questions} 個全新挑戰...")
-        new_questions = tutor.generate_new_question_batch(num_new_questions)
+    # 產生新題目 (使用計算後的新數量)
+    if num_new_to_generate > 0:
+        new_questions = tutor.generate_new_question_batch(num_new_to_generate)
         if new_questions:
             for q in new_questions:
                  if isinstance(q, dict):
