@@ -168,7 +168,7 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
     if not is_correct:
         print(f"\n(本句主要錯誤已歸檔：{primary_error_category} - {primary_error_subcategory})")
 
-        
+
 # --- AI 功能函式 ---
 try:
     client = openai.OpenAI()
@@ -313,9 +313,26 @@ def generate_new_question_batch(num_new, difficulty, length):
     
 def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
     """
-    【v5.12 改造】: 引入 key_point_summary，要求 AI 為每個錯誤點提煉標題。
+    【v5.13 最終改造】: 引入「錯誤焦點」概念，透過大量範例，指導 AI 生成極度精簡的要點。
     """
-    # 根據有無 review_context，動態生成不同的 prompt
+    
+    # 共同的指令部分，定義了 error_analysis 的結構和 key_point_summary 的生成規則
+    error_analysis_instructions = """
+    4.  `error_analysis`: (array of objects) 一個清單，如果沒有任何錯誤，請回傳一個空清單 `[]`。
+        清單中的每一個物件都必須包含以下所有欄位：
+        * `key_point_summary`: (string) 【最重要的欄位】請為這個錯誤點提煉一個「錯誤焦點」。這不是一個普通的標題，而是一個能讓學生立刻回憶起錯誤的、精簡的提示。請嚴格模仿下方的範例格式：
+            - 如果是介系詞錯誤，範例：`"on" the other hand`
+            - 如果是動詞時態/形式錯誤，範例：`strive "to V"` 或 `be used "to V-ing"`
+            - 如果是特定文法結構，範例：`強調句構 (It is... that...)`
+            - 如果是單字拼寫錯誤，範例：`"tomorrow" (拼寫)`
+        * `error_type`: (string) `文法錯誤`, `單字選擇`, `慣用語不熟`, `語氣不當`, `句構問題`, `拼寫錯誤`, `贅字或漏字`。
+        * `error_subtype`: (string) 2-5 個字的專業術語。
+        * `original_phrase`: (string) 從學生答案中，精確地提取出錯誤的那個單字或片語。
+        * `correction`: (string) 針對該錯誤片語，提供正確的寫法。
+        * `explanation`: (string) 簡潔地解釋為什麼這是錯的。
+        * `severity`: (string) `major` 或 `minor`。
+    """
+
     if review_context:
         # 這是複習題的「目標導向」prompt
         system_prompt = f"""
@@ -335,9 +352,8 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
         1.  `did_master_review_concept`: (boolean) 學生是否掌握了本次的核心複習觀念。
         2.  `is_generally_correct`: (boolean) 綜合判斷，學生的句子整體是否大致正確。
         3.  `overall_suggestion`: (string) 提供整體最流暢的翻譯建議。
-        4.  `error_analysis`: (array of objects) 其他所有錯誤的分析列表。
-            **在 error_analysis 的每個物件中，除了原有欄位，請務必新增一個 `key_point_summary` 欄位，用 5-10 個字的中文，為這個錯誤點下一個精準、易於記憶的「標題」。**
-        
+        {error_analysis_instructions}
+
         **原始中文句子是**："{chinese_sentence}"
         """
     else:
@@ -349,24 +365,25 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
         你必須嚴格回傳一個 JSON 物件，絕對不能包含 JSON 格式以外的任何文字。此 JSON 物件必須包含以下欄位：
         1.  `is_generally_correct`: (boolean)
         2.  `overall_suggestion`: (string)
-        3.  `error_analysis`: (array of objects) 一個清單，如果沒有任何錯誤，請回傳一個空清單 `[]`。
-            清單中的每一個物件都必須包含以下所有欄位：
-            * `key_point_summary`: (string) 【新增欄位】請用 5-10 個字的中文，為這個錯誤點下一個精準、易於記憶的「標題」。例如：「『另一方面』的說法」或「對過去的懊悔 (假設語氣)」。
-            * `error_type`: (string) `文法錯誤`, `單字選擇`, `慣用語不熟`, `語氣不當`, `句構問題`, `拼寫錯誤`, `贅字或漏字`。
-            * `error_subtype`: (string) 2-5 個字的專業術語。
-            * `original_phrase`: (string) 從學生答案中，精確地提取出錯誤的那個單字或片語。
-            * `correction`: (string) 針對該錯誤片語，提供正確的寫法。
-            * `explanation`: (string) 簡潔地解釋為什麼這是錯的。
-            * `severity`: (string) `major` 或 `minor`。
+        3.  `error_analysis`: (array of objects)
+        {error_analysis_instructions}
 
         **原始中文句子是**："{chinese_sentence}"
         """
 
     user_prompt = f"這是我的翻譯：「{user_translation}」。請根據你的專業知識和上述指令，為我生成一份鉅細靡遺的 JSON 分析報告。"
 
+    if MONITOR_MODE:
+        print("\n" + "="*20 + " AI 批改 (v5.13) INPUT " + "="*20)
+        print("--- SYSTEM PROMPT ---")
+        print(system_prompt)
+        print("\n--- USER PROMPT ---")
+        print(user_prompt)
+        print("="*65 + "\n")
+
     try:
         response = client.chat.completions.create(
-            model="gpt-4o-mini",
+            model="gpt-4o", # 使用能力更強的模型來理解和遵循複雜的格式指令
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
