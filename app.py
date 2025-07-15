@@ -158,24 +158,23 @@ def submit_answer_endpoint():
 @app.route("/get_dashboard", methods=['GET'])
 def get_dashboard_endpoint():
     """
-    【v5.4 PostgreSQL 版】: 使用新的連線函式和字典 cursor。
+    【v5.12 改造】: 在回傳給 App 的資料中，加入 key_point_summary。
     """
     print("\n[API] 收到請求：獲取知識點儀表板數據...")
     conn = None
     try:
         conn = tutor.get_db_connection()
-        # 使用 DictCursor 讓回傳的結果可以用欄位名稱存取
         with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
             cursor.execute("""
                 SELECT 
                     category, subcategory, correct_phrase, explanation, 
                     user_context_sentence, incorrect_phrase_in_context, 
+                    key_point_summary,
                     mastery_level, mistake_count, correct_count 
                 FROM knowledge_points 
                 ORDER BY mastery_level ASC, mistake_count DESC
             """)
             points_raw = cursor.fetchall()
-        # DictCursor 回傳的結果可以直接轉換為字典列表
         points_dict = [dict(row) for row in points_raw]
         return jsonify({"knowledge_points": points_dict})
     except Exception as e:

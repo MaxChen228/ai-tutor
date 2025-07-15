@@ -35,15 +35,12 @@ def get_db_connection():
 
 def init_db():
     """
-    【v5.4 PostgreSQL 版】: 初始化 PostgreSQL 資料庫和表格。
+    【v5.12 改造】: 為 knowledge_points 表格新增 key_point_summary 欄位。
     """
     conn = get_db_connection()
-    # 使用 with 陳述式可以確保 cursor 和連線在使用後自動關閉
     with conn.cursor() as cursor:
         print("正在檢查並初始化 PostgreSQL 資料庫...")
 
-        # SERIAL PRIMARY KEY 是 PostgreSQL 的自增主鍵
-        # TIMESTAMPTZ 是帶有時區的標準時間戳格式
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS learning_events (
             id SERIAL PRIMARY KEY,
@@ -74,6 +71,7 @@ def init_db():
             explanation TEXT,
             user_context_sentence TEXT,
             incorrect_phrase_in_context TEXT,
+            key_point_summary TEXT,
             mastery_level REAL DEFAULT 0.0,
             mistake_count INTEGER DEFAULT 0,
             correct_count INTEGER DEFAULT 0,
@@ -87,8 +85,7 @@ def init_db():
 
 def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
     """
-    【v5.10 改造】: 增加 exclude_phrase 參數。
-    如果提供了此參數，則在記錄新錯誤時，會忽略掉與之相符的知識點，避免重複懲罰。
+    【v5.12 改造】: 記錄錯誤時，將 key_point_summary 一併存入資料庫。
     """
     conn = get_db_connection()
     with conn.cursor() as cursor:
@@ -122,22 +119,22 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
             feedback_json, datetime.datetime.now(datetime.timezone.utc))
         )
         
-        # 只有在句子整體不正確時，才進入此迴圈記錄新錯誤
         if not is_correct and error_analysis:
             print("\n正在更新您的具體知識點弱點分析...")
             for error in error_analysis:
-                category = error.get('error_type')
-                subcategory = error.get('error_subtype')
                 correct_phrase = error.get('correction')
-                explanation = error.get('explanation')
-                incorrect_phrase = error.get('original_phrase')
                 
-                if not category or not subcategory or not correct_phrase:
-                    continue
-
-                # 如果當前錯誤的「正確片語」是被指定要忽略的，則跳過此迴圈
                 if exclude_phrase and correct_phrase == exclude_phrase:
                     print(f"  - (忽略已處理的複習點: {exclude_phrase})")
+                    continue
+                
+                category = error.get('error_type')
+                subcategory = error.get('error_subtype')
+                explanation = error.get('explanation')
+                incorrect_phrase = error.get('original_phrase')
+                summary = error.get('key_point_summary', '核心觀念') # 新增，並提供預設值
+                
+                if not category or not subcategory or not correct_phrase:
                     continue
 
                 cursor.execute("SELECT id, mastery_level FROM knowledge_points WHERE correct_phrase = %s", (correct_phrase,))
@@ -149,21 +146,21 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
                     cursor.execute(
                         """
                         UPDATE knowledge_points 
-                        SET mistake_count = mistake_count + 1, mastery_level = %s, user_context_sentence = %s, incorrect_phrase_in_context = %s, last_reviewed_on = %s, next_review_date = %s
+                        SET mistake_count = mistake_count + 1, mastery_level = %s, user_context_sentence = %s, incorrect_phrase_in_context = %s, key_point_summary = %s, last_reviewed_on = %s, next_review_date = %s
                         WHERE id = %s
                         """,
-                        (new_mastery_level, user_answer, incorrect_phrase, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1), point[0])
+                        (new_mastery_level, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1), point[0])
                     )
-                    print(f"  - 已更新弱點：[{correct_phrase}]，熟練度下降。")
+                    print(f"  - 已更新弱點：[{summary}]，熟練度下降。")
                 else:
                     cursor.execute(
                         """
-                        INSERT INTO knowledge_points (category, subcategory, correct_phrase, explanation, user_context_sentence, incorrect_phrase_in_context, mistake_count, mastery_level, last_reviewed_on, next_review_date)
-                        VALUES (%s, %s, %s, %s, %s, %s, 1, 0.0, %s, %s)
+                        INSERT INTO knowledge_points (category, subcategory, correct_phrase, explanation, user_context_sentence, incorrect_phrase_in_context, key_point_summary, mistake_count, mastery_level, last_reviewed_on, next_review_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, 1, 0.0, %s, %s)
                         """,
-                        (category, subcategory, correct_phrase, explanation, user_answer, incorrect_phrase, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1))
+                        (category, subcategory, correct_phrase, explanation, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1))
                     )
-                    print(f"  - 已發現新弱點：[{correct_phrase}]，已加入複習計畫。")
+                    print(f"  - 已發現新弱點：[{summary}]，已加入複習計畫。")
 
     conn.commit()
     conn.close()
@@ -171,6 +168,7 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
     if not is_correct:
         print(f"\n(本句主要錯誤已歸檔：{primary_error_category} - {primary_error_subcategory})")
 
+        
 # --- AI 功能函式 ---
 try:
     client = openai.OpenAI()
@@ -315,30 +313,8 @@ def generate_new_question_batch(num_new, difficulty, length):
     
 def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
     """
-    【v5.10 改造】: 引入 review_context，實現「目標導向批改」。
-    如果提供了 review_context，會要求 AI 額外判斷該核心觀念是否被掌握。
+    【v5.12 改造】: 引入 key_point_summary，要求 AI 為每個錯誤點提煉標題。
     """
-    # 基礎的 prompt，用於新題目
-    base_system_prompt = f"""
-    你是一位極其細心、專業且有耐心的英文家教。你的任務是像批改作業一樣，逐字逐句分析學生從中文翻譯到英文的答案，並回傳一份結構化的 JSON 分析報告。
-
-    **【重要指令】輸出格式**
-    你必須嚴格回傳一個 JSON 物件，絕對不能包含 JSON 格式以外的任何文字。此 JSON 物件必須包含以下欄位：
-
-    1.  `is_generally_correct`: (boolean) 綜合判斷，儘管有錯誤，學生的翻譯是否在整體語意上大致正確。
-    2.  `overall_suggestion`: (string) 提供一個或多個整體最流暢、最道地的英文翻譯建議。
-    3.  `error_analysis`: (array of objects) 一個清單，其中包含你找出的【所有】錯誤。如果沒有任何錯誤，請回傳一個空清單 `[]`。
-        清單中的每一個物件都必須包含以下欄位：
-        * `error_type`: (string) 從以下列表中選擇：`文法錯誤`, `單字選擇`, `慣用語不熟`, `語氣不當`, `句構問題`, `拼寫錯誤`, `贅字或漏字`。
-        * `error_subtype`: (string) 請用 2-5 個字的專業術語，精準描述錯誤的核心觀念 (例如：「動詞時態」、「介系詞搭配」、「主詞動詞一致」)。
-        * `original_phrase`: (string) 從學生答案中，精確地提取出錯誤的那個單字或片語。
-        * `correction`: (string) 針對該錯誤片語，提供正確的寫法。
-        * `explanation`: (string) 簡潔地解釋為什麼這是錯的，以及為什麼修正後是正確的。
-        * `severity`: (string) 判斷此錯誤的嚴重性，分為 `major` (影響理解的結構性或語意錯誤) 或 `minor` (不影響理解的拼寫、單複數等小錯誤)。
-
-    **原始中文句子是**："{chinese_sentence}"
-    """
-    
     # 根據有無 review_context，動態生成不同的 prompt
     if review_context:
         # 這是複習題的「目標導向」prompt
@@ -349,10 +325,10 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
         學生的本次作答，是為了測驗他是否已經掌握了以下這個核心觀念：
         - **核心複習觀念: "{review_context}"**
 
-        請在你的 JSON 回覆中，務必包含一個名為 `did_master_review_concept` 的布林值欄位，用來明確回答「學生的翻譯是否正確地應用了上述的核心複習觀念？」。即使學生的句子中有其他拼寫或文法錯誤，只要他對這個核心觀念的運用是正確的，此欄位就應為 `true`。
+        請在你的 JSON 回覆中，務必包含一個名為 `did_master_review_concept` 的布林值欄位。
 
         **你的次要任務：**
-        在完成首要任務後，請對學生的整個句子進行常規的錯誤分析，並將結果填入 `error_analysis` 列表中。
+        在完成首要任務後，請對學生的整個句子進行常規的錯誤分析。
 
         **【重要指令】輸出格式**
         你的 JSON 回覆必須包含以下所有欄位：
@@ -360,12 +336,31 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
         2.  `is_generally_correct`: (boolean) 綜合判斷，學生的句子整體是否大致正確。
         3.  `overall_suggestion`: (string) 提供整體最流暢的翻譯建議。
         4.  `error_analysis`: (array of objects) 其他所有錯誤的分析列表。
-
+            **在 error_analysis 的每個物件中，除了原有欄位，請務必新增一個 `key_point_summary` 欄位，用 5-10 個字的中文，為這個錯誤點下一個精準、易於記憶的「標題」。**
+        
         **原始中文句子是**："{chinese_sentence}"
         """
     else:
         # 這是新題目的常規 prompt
-        system_prompt = base_system_prompt
+        system_prompt = f"""
+        你是一位極其細心、專業且有耐心的英文家教。你的任務是像批改作業一樣，逐字逐句分析學生從中文翻譯到英文的答案，並回傳一份結構化的 JSON 分析報告。
+
+        **【重要指令】輸出格式**
+        你必須嚴格回傳一個 JSON 物件，絕對不能包含 JSON 格式以外的任何文字。此 JSON 物件必須包含以下欄位：
+        1.  `is_generally_correct`: (boolean)
+        2.  `overall_suggestion`: (string)
+        3.  `error_analysis`: (array of objects) 一個清單，如果沒有任何錯誤，請回傳一個空清單 `[]`。
+            清單中的每一個物件都必須包含以下所有欄位：
+            * `key_point_summary`: (string) 【新增欄位】請用 5-10 個字的中文，為這個錯誤點下一個精準、易於記憶的「標題」。例如：「『另一方面』的說法」或「對過去的懊悔 (假設語氣)」。
+            * `error_type`: (string) `文法錯誤`, `單字選擇`, `慣用語不熟`, `語氣不當`, `句構問題`, `拼寫錯誤`, `贅字或漏字`。
+            * `error_subtype`: (string) 2-5 個字的專業術語。
+            * `original_phrase`: (string) 從學生答案中，精確地提取出錯誤的那個單字或片語。
+            * `correction`: (string) 針對該錯誤片語，提供正確的寫法。
+            * `explanation`: (string) 簡潔地解釋為什麼這是錯的。
+            * `severity`: (string) `major` 或 `minor`。
+
+        **原始中文句子是**："{chinese_sentence}"
+        """
 
     user_prompt = f"這是我的翻譯：「{user_translation}」。請根據你的專業知識和上述指令，為我生成一份鉅細靡遺的 JSON 分析報告。"
 
@@ -382,19 +377,9 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
         return feedback_data
     except Exception as e:
         print(f"AI 批改時發生錯誤: {e}")
-        # 確保錯誤回傳時，包含 did_master_review_concept 欄位
         return {
-            "did_master_review_concept": False,
-            "is_generally_correct": False,
-            "overall_suggestion": "N/A",
-            "error_analysis": [{
-                "error_type": "系統錯誤",
-                "error_subtype": "AI 回覆格式錯誤",
-                "original_phrase": "N/A",
-                "correction": "N/A",
-                "explanation": f"系統無法處理 AI 的回覆：{e}",
-                "severity": "major"
-            }]
+            "did_master_review_concept": False, "is_generally_correct": False, "overall_suggestion": "N/A",
+            "error_analysis": [{"error_type": "系統錯誤", "explanation": f"系統無法處理 AI 的回覆：{e}"}]
         }
 
 def update_knowledge_point_mastery(point_id, current_mastery):
