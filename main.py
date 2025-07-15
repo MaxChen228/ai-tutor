@@ -423,12 +423,23 @@ def update_knowledge_point_mastery(point_id, current_mastery):
 
 def get_due_knowledge_points(limit):
     """
-    【v5.4 PostgreSQL 版】: 獲取到期且掌握度最低的「知識點」。
+    【v5.14 時區修正版】: 根據台灣時區 (UTC+8) 來獲取當天日期，解決清晨無法複習的問題。
     """
     conn = get_db_connection()
     # 使用 DictCursor 讓回傳的結果可以用欄位名稱存取
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        today = datetime.date.today()
+        # 【核心修改處】: 手動校準時區
+        # 1. 獲取當前的 UTC+0 時間
+        utc_now = datetime.datetime.now(datetime.timezone.utc)
+        # 2. 建立一個 8 小時的時差物件
+        taipei_offset = datetime.timedelta(hours=8)
+        # 3. 將 UTC+0 時間加上 8 小時，得到台北的當前時間
+        taipei_now = utc_now + taipei_offset
+        # 4. 從台北時間中，取出今天的日期
+        today_in_taipei = taipei_now.date()
+
+        print(f"[API] 伺服器UTC日期: {utc_now.date()} | 校準後台北日期: {today_in_taipei}")
+
         cursor.execute(
             """
             SELECT * FROM knowledge_points 
@@ -436,7 +447,8 @@ def get_due_knowledge_points(limit):
             ORDER BY mastery_level ASC, last_reviewed_on ASC
             LIMIT %s
             """,
-            (today, limit)
+            # 使用校準後的台北日期進行查詢
+            (today_in_taipei, limit)
         )
         points = cursor.fetchall()
     conn.close()
