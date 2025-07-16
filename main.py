@@ -313,7 +313,7 @@ def generate_new_question_batch(num_new, difficulty, length):
     
 def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
     """
-    【v5.13 最終改造】: 引入「錯誤焦點」概念，透過大量範例，指導 AI 生成極度精簡的要點。
+    【v5.15.3 最終改造】: 在 Prompt 中加入排他性指令，防止 AI 在 error_analysis 中回報已掌握的複習觀念。
     """
     
     # 共同的指令部分，定義了 error_analysis 的結構和 key_point_summary 的生成規則
@@ -342,16 +342,20 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
         學生的本次作答，是為了測驗他是否已經掌握了以下這個核心觀念：
         - **核心複習觀念: "{review_context}"**
 
-        請在你的 JSON 回覆中，務必包含一個名為 `did_master_review_concept` 的布林值欄位。
+        請在你的 JSON 回覆中，務必包含一個名為 `did_master_review_concept` 的布林值欄位，用來明確回答「學生的翻譯是否正確地應用了上述的核心複習觀念？」。
 
         **你的次要任務：**
-        在完成首要任務後，請對學生的整個句子進行常規的錯誤分析。
+        在完成首要任務後，請對學生的整個句子進行常規的錯誤分析，並將結果填入 `error_analysis` 列表中。
 
-        **【重要指令】輸出格式**
+        **【極重要的新增指令：排他性原則】**
+        在你的次要任務中，`error_analysis` 列表應該**只包含與「核心複習觀念」無關的其他新錯誤**。如果某個文法點或用法，其本質就是正在複習的這個核心觀念，**請絕對不要**將它再次放入 `error_analysis` 列表中。
+        例如，如果核心複習觀念是 "strives"，而學生寫對了 "strives to improve"，那麼 `error_analysis` 列表中，絕對不應該再出現任何關於 "strive to V" 的分析，即使是正面的教學說明也不行。
+
+        **【輸出格式指令】**
         你的 JSON 回覆必須包含以下所有欄位：
-        1.  `did_master_review_concept`: (boolean) 學生是否掌握了本次的核心複習觀念。
-        2.  `is_generally_correct`: (boolean) 綜合判斷，學生的句子整體是否大致正確。
-        3.  `overall_suggestion`: (string) 提供整體最流暢的翻譯建議。
+        1.  `did_master_review_concept`: (boolean)
+        2.  `is_generally_correct`: (boolean)
+        3.  `overall_suggestion`: (string)
         {error_analysis_instructions}
 
         **原始中文句子是**："{chinese_sentence}"
@@ -365,7 +369,6 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
         你必須嚴格回傳一個 JSON 物件，絕對不能包含 JSON 格式以外的任何文字。此 JSON 物件必須包含以下欄位：
         1.  `is_generally_correct`: (boolean)
         2.  `overall_suggestion`: (string)
-        3.  `error_analysis`: (array of objects)
         {error_analysis_instructions}
 
         **原始中文句子是**："{chinese_sentence}"
@@ -374,7 +377,7 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
     user_prompt = f"這是我的翻譯：「{user_translation}」。請根據你的專業知識和上述指令，為我生成一份鉅細靡遺的 JSON 分析報告。"
 
     if MONITOR_MODE:
-        print("\n" + "="*20 + " AI 批改 (v5.13) INPUT " + "="*20)
+        print("\n" + "="*20 + " AI 批改 (v5.15.3) INPUT " + "="*20)
         print("--- SYSTEM PROMPT ---")
         print(system_prompt)
         print("\n--- USER PROMPT ---")
@@ -383,7 +386,7 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
 
     try:
         response = client.chat.completions.create(
-            model="gpt-4o", # 使用能力更強的模型來理解和遵循複雜的格式指令
+            model="gpt-4o",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
