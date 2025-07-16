@@ -5,7 +5,7 @@ import random
 import json
 import psycopg2 # 引入 PostgreSQL 驅動
 import psycopg2.extras # 引入用於字典 cursor 的額外功能
-from prompt_assets import EXAMPLE_SENTENCE_BANK # 【新增】引入我們的「彈藥庫」
+from app.assets import EXAMPLE_SENTENCE_BANK # 【新增】引入我們的「彈藥庫」
 
 
 
