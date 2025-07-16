@@ -401,25 +401,42 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
 
 def update_knowledge_point_mastery(point_id, current_mastery):
     """
-    【v5.4 PostgreSQL 版】: 更新答對的知識點熟練度。
+    【v5.15.2 修正】: 加入 rowcount 檢查，確保 UPDATE 指令確實執行成功。
     """
+    print(f"[DEBUG] 準備更新知識點 ID: {point_id}，目前熟練度: {current_mastery}")
+    
     new_mastery_level = min(5.0, current_mastery + 0.25)
     interval_days = max(1, round(2 ** new_mastery_level))
     next_review_date = datetime.date.today() + datetime.timedelta(days=interval_days)
     
     conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute(
-            """
-            UPDATE knowledge_points 
-            SET mastery_level = %s, correct_count = correct_count + 1, next_review_date = %s 
-            WHERE id = %s
-            """,
-            (new_mastery_level, next_review_date, point_id)
-        )
-    conn.commit()
-    conn.close()
-    print(f"(太棒了！這個觀念我們安排在 {interval_days} 天後複習。)")
+    updated_rows = 0 # 初始化一個變數來記錄更新的行數
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE knowledge_points 
+                SET mastery_level = %s, correct_count = correct_count + 1, next_review_date = %s 
+                WHERE id = %s
+                """,
+                (new_mastery_level, next_review_date, point_id)
+            )
+            # 【核心修正】: 獲取被更新的行數
+            updated_rows = cursor.rowcount
+            conn.commit()
+    except Exception as e:
+        print(f"[ERROR] 更新 knowledge_point 時發生資料庫錯誤: {e}")
+        conn.rollback() # 如果出錯，撤銷操作
+    finally:
+        conn.close()
+
+    # 【核心修正】: 根據執行結果，打印不同的日誌
+    if updated_rows > 0:
+        print(f"✅ 知識點 ID: {point_id} 已成功更新！安排在 {interval_days} 天後複習。")
+    else:
+        print(f"⚠️ 警告：更新知識點 ID: {point_id} 時，沒有找到對應的紀錄，更新失敗。")
+
 
 def get_due_knowledge_points(limit):
     """
