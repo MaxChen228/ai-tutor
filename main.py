@@ -404,10 +404,17 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None):
 
 def update_knowledge_point_mastery(point_id, current_mastery):
     """
-    【v5.15.2 修正】: 加入 rowcount 檢查，確保 UPDATE 指令確實執行成功。
+    【v5.15.2 最終修正】: 加入 rowcount 檢查和詳細的偵錯日誌，確保 UPDATE 指令確實執行成功。
     """
-    print(f"[DEBUG] 準備更新知識點 ID: {point_id}，目前熟練度: {current_mastery}")
+    # 步驟 1: 打印傳入的參數，讓我們知道函式是否被正確呼叫
+    print(f"[DEBUG] update_knowledge_point_mastery 函式被呼叫。")
+    print(f"[DEBUG] 準備更新知識點 ID: {point_id} (類型: {type(point_id)}), 目前熟練度: {current_mastery}")
     
+    # 檢查傳入的 point_id 是否有效
+    if point_id is None:
+        print(f"⚠️ 嚴重警告：傳入的 point_id 為 None，無法執行更新。請檢查前端回傳的資料。")
+        return # 直接退出函式，不執行任何操作
+
     new_mastery_level = min(5.0, current_mastery + 0.25)
     interval_days = max(1, round(2 ** new_mastery_level))
     next_review_date = datetime.date.today() + datetime.timedelta(days=interval_days)
@@ -423,9 +430,9 @@ def update_knowledge_point_mastery(point_id, current_mastery):
                 SET mastery_level = %s, correct_count = correct_count + 1, next_review_date = %s 
                 WHERE id = %s
                 """,
-                (new_mastery_level, next_review_date, point_id)
+                (new_mastery_level, next_review_date, int(point_id)) # 步驟 2: 強制將 point_id 轉為整數，以防萬一
             )
-            # 【核心修正】: 獲取被更新的行數
+            # 步驟 3: 獲取被更新的行數
             updated_rows = cursor.rowcount
             conn.commit()
     except Exception as e:
@@ -434,11 +441,12 @@ def update_knowledge_point_mastery(point_id, current_mastery):
     finally:
         conn.close()
 
-    # 【核心修正】: 根據執行結果，打印不同的日誌
+    # 步驟 4: 根據執行結果，打印不同的日誌
     if updated_rows > 0:
-        print(f"✅ 知識點 ID: {point_id} 已成功更新！安排在 {interval_days} 天後複習。")
+        print(f"✅ 知識點 ID: {point_id} 已成功更新！影響行數: {updated_rows}。安排在 {interval_days} 天後複習。")
     else:
-        print(f"⚠️ 警告：更新知識點 ID: {point_id} 時，沒有找到對應的紀錄，更新失敗。")
+        print(f"⚠️ 警告：更新知識點 ID: {point_id} 時，資料庫中沒有找到對應的紀錄，更新失敗！影響行數: {updated_rows}。")
+
 
 
 def get_due_knowledge_points(limit):
