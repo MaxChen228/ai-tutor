@@ -16,7 +16,6 @@ print(f"[AI Service] 目前使用的 LLM 供應商: {LLM_PROVIDER}")
 
 # OpenAI 初始化
 try:
-    # 僅在環境變數存在時才初始化客戶端
     openai_client = openai.OpenAI() if os.environ.get("OPENAI_API_KEY") else None
 except openai.OpenAIError:
     openai_client = None
@@ -28,9 +27,8 @@ try:
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
     if gemini_api_key:
         genai.configure(api_key=gemini_api_key)
-        # 設定 generation_config 以確保回傳的是 JSON
         gemini_model = genai.GenerativeModel(
-            'gemini-2.5-pro',
+            'gemini-1.5-flash',
             generation_config=genai.GenerationConfig(
                 response_mime_type="application/json"
             )
@@ -79,7 +77,6 @@ def _call_gemini_api(system_prompt, user_prompt):
     if not gemini_model:
         raise ValueError("Gemini API 金鑰未設定或模型初始化失敗。")
     
-    # Gemini 通常在單一 Prompt 中表現更好，將 system 和 user prompt 合併
     full_prompt = system_prompt + "\n\n" + user_prompt
 
     if MONITOR_MODE:
@@ -88,8 +85,6 @@ def _call_gemini_api(system_prompt, user_prompt):
         print("="*60 + "\n")
         
     response = gemini_model.generate_content(full_prompt)
-    # Gemini 的 JSON 輸出有時會包含 markdown，需要清理
-    # 新版的 API 搭配 response_mime_type="application/json" 可以直接回傳 text
     return json.loads(response.text)
 
 def _normalize_questions_output(response_data):
@@ -98,7 +93,6 @@ def _normalize_questions_output(response_data):
         return response_data["questions"]
     elif isinstance(response_data, list):
          return response_data
-    # 針對 OpenAI 可能出現的非標準格式做相容 (例如根部就是一個 key，其 value 是 list)
     elif isinstance(response_data, dict):
         for value in response_data.values():
             if isinstance(value, list):
@@ -125,7 +119,7 @@ def generate_question_batch(weak_points_str, num_review):
     try:
         if LLM_PROVIDER == 'GEMINI':
             response_data = _call_gemini_api(system_prompt, user_prompt)
-        else: # 預設使用 OpenAI
+        else:
             response_data = _call_openai_api(system_prompt, user_prompt)
         return _normalize_questions_output(response_data)
     except Exception as e:
@@ -164,7 +158,7 @@ def generate_new_question_batch(num_new, difficulty, length):
     try:
         if LLM_PROVIDER == 'GEMINI':
             response_data = _call_gemini_api(system_prompt, user_prompt)
-        else: # 預設使用 OpenAI
+        else:
             response_data = _call_openai_api(system_prompt, user_prompt)
         return _normalize_questions_output(response_data)
     except Exception as e:
@@ -173,41 +167,77 @@ def generate_new_question_batch(num_new, difficulty, length):
 
 def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, hint_text=None):
     """批改使用者答案並提供回饋 (Dispatcher)。"""
-    # 這是兩個 prompt 都會用到的共用說明
+
+    # 【v5.19 規則強化版】: 注入了清晰定義和豐富範例的全新 Prompt 核心
     error_analysis_instructions = """
-    4.  `error_analysis`: (array of objects) 一個清單，如果沒有任何錯誤，請回傳一個空清單 `[]`。
-        清單中的每一個物件都必須包含以下所有欄位：
-        * `key_point_summary`: (string) 【最重要的欄位】請為這個錯誤點提煉一個「錯誤焦點」。
-        * `error_type`: (string) 【極重要】你「必須」從以下三個層級中選擇一個最貼切的分類：`詞彙與片語層級 (Lexical & Phrasal)`、`語法結構層級 (Grammatical & Structural)`、`語意與語用層級 (Semantic & Pragmatic)`。
-        * `error_subtype`: (string) 2-5 個字的具體錯誤類型，例如：`介係詞搭配`, `時態錯誤`。
-        * `original_phrase`: (string) 從學生答案中，精確地提取出錯誤的那個單字或片語。
-        * `correction`: (string) 針對該錯誤片語，提供正確的寫法。
-        * `explanation`: (string) 簡潔地解釋為什麼這是錯的。
-        * `severity`: (string) `major` 或 `minor`。
+    `error_analysis` (array of objects):
+    
+    **【極重要】錯誤分類的三層級定義與規範：**
+    你必須嚴格遵守以下分類定義，絕不混淆。
+    
+    ---
+    **1. `詞彙與片語層級 (Lexical & Phrasal)`**
+    * **定義**: 關乎「單一詞彙」或「固定片語搭配」的錯誤。這是最小的錯誤單位。
+    * **範疇**: 介係詞 (`in`, `on`, `at`), 固定搭配 (Collocations), 近義詞混淆, 拼寫錯誤。
+    * **分類範例**:
+        * 錯誤: "I am interested `on` it." -> 正確分類: `詞彙與片語層級` (因為 `interested in` 是固定搭配)
+        * 錯誤: "He made a `speech`." (情境應為 'gave a speech') -> 正確分類: `詞彙與片語層級` (動詞搭配錯誤)
+        * 錯誤: "I `recommand` this book." -> 正確分類: `詞彙與片語層級` (拼寫錯誤)
+
+    ---
+    **2. `語法結構層級 (Grammatical & Structural)`**
+    * **定義**: 關乎「句子組合規則」的錯誤，即文法錯誤。錯誤單位是詞與詞之間的關係或句子結構。
+    * **範疇**: 時態 (Tenses), 主謂一致 (S-V Agreement), 冠詞 (`a`, `an`, `the`), 名詞單複數, 句子結構（如倒裝、假設語氣）, 詞性誤用（如用形容詞修飾動詞）。
+    * **分類範例**:
+        * 錯誤: "He `go` to school." -> 正確分類: `語法結構層級` (主謂不一致)
+        * 錯誤: "I `have went` there." -> 正確分類: `語法結構層級` (時態錯誤，現在完成式結構錯誤)
+        * 錯誤: "This is `apple`." -> 正確分類: `語法結構層級` (冠詞缺失)
+        * **【特別指令】**: 所有關於「時態」、「假設語氣」、「倒裝句」等句子級別的結構性問題，**必須**被歸類於此。
+
+    ---
+    **3. `語意與語用層級 (Semantic & Pragmatic)`**
+    * **定義**: 關乎「意義表達」與「使用情境」的錯誤。句子本身文法可能正確，但在特定情境下顯得不自然、不禮貌、有歧義或冗餘。
+    * **範疇**: 語氣與正式度 (Tone & Formality), 冗餘/贅字 (Redundancy), 文化慣用法, 中式英文 (Chinglish)。
+    * **分類範例**:
+        * 錯誤: (在商業郵件中) "Give me the report." -> 正確分類: `語意與語用層級` (語氣過於直接，不夠正式)
+        * 錯誤: "The reason is `because`..." -> 正確分類: `語意與語用層級` (語意冗餘)
+        * 錯誤: "You and me should go." -> 正確分類: `語意與語用層級` (語用習慣上會說 'You and I')
+    ---
+    
+    **每個錯誤物件的欄位結構:**
+    * `key_point_summary`: (string) 錯誤焦點的簡潔提示。
+    * `error_type`: (string) 【必須】從上述三層級中精準選擇一個。
+    * `error_subtype`: (string) 2-5 個字的具體錯誤類型，例如：`介係詞搭配`, `時態錯誤`。
+    * `original_phrase`: (string) 從學生答案中提取的錯誤片段。
+    * `correction`: (string) 正確的寫法。
+    * `explanation`: (string) 簡潔的解釋。
+    * `severity`: (string) `major` 或 `minor`。
     """
     
     if review_context:
-        # 這是複習題的「目標導向」prompt
         system_prompt = f"""
-        你是一位英文教學專家，正在驗收學生對核心觀念的掌握。
+        你是一位嚴格的英文教學評審，正在驗收學生對核心觀念的掌握。
         **首要任務**: 判斷學生作答是否掌握了「核心複習觀念: {review_context}」，並在回傳的 JSON 中設定 `did_master_review_concept` (boolean) 的值。
-        **次要任務**: 分析其他與核心觀念無關的錯誤。
+        **次要任務**: 根據下方提供的【三層級定義與規範】，精準分析其他與核心觀念無關的新錯誤。
         **排他性原則**: `error_analysis` 列表絕對不應包含與核心複習觀念相關的分析。
-        **輸出格式**: 你的 JSON 回覆必須包含 `did_master_review_concept`(boolean), `is_generally_correct`(boolean), `overall_suggestion`(string), 和 `error_analysis`(array)。
+        **輸出格式**: JSON 必須包含 `did_master_review_concept`(boolean), `is_generally_correct`(boolean), `overall_suggestion`(string), 和 `error_analysis`(array)。
+        ---
         {error_analysis_instructions}
+        ---
         **原始中文句子是**: "{chinese_sentence}"
         """
     else:
-        # 這是新題目的常規 prompt
         system_prompt = f"""
-        你是一位細心的英文家教，請分析學生的翻譯答案。
+        你是一位極其細心且嚴格的英文家教，請根據下方提供的【三層級定義與規範】，精準分析學生的翻譯答案。
         **核心考點提示**: 「{hint_text if hint_text else '無特定提示'}」。請特別留意此點的掌握情況。
-        **輸出格式**: 你的 JSON 回覆必須包含 `is_generally_correct`(boolean), `overall_suggestion`(string), 和 `error_analysis`(array)。
+        **輸出格式**: JSON 必須包含 `is_generally_correct`(boolean), `overall_suggestion`(string), 和 `error_analysis`(array)。
+        ---
         {error_analysis_instructions}
+        ---
         **原始中文句子是**: "{chinese_sentence}"
         """
         
-    user_prompt = f"這是我的翻譯：「{user_translation}」。請根據你的專業知識和上述指令，為我生成一份鉅細靡遺的 JSON 分析報告。"
+    user_prompt = f"這是我的翻譯：「{user_translation}」。請嚴格根據你被賦予的【三層級定義與規範】，為我生成一份鉅細靡遺的 JSON 分析報告。"
 
     try:
         if LLM_PROVIDER == 'GEMINI':
