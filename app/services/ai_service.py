@@ -165,22 +165,32 @@ def generate_new_question_batch(num_new, difficulty, length):
 def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, hint_text=None):
     """
     【v5.16 智慧提示版】: 接收 hint_text 並將其整合進 Prompt。
+    【v5.17 分類優化版】: 引入三層級錯誤分類系統。
     """
     
-    # 共同的指令部分，定義了 error_analysis 的結構和 key_point_summary 的生成規則
+    # 【核心修改】將錯誤分類指示更新為您提供的三層級分類法
     error_analysis_instructions = """
     4.  `error_analysis`: (array of objects) 一個清單，如果沒有任何錯誤，請回傳一個空清單 `[]`。
         清單中的每一個物件都必須包含以下所有欄位：
         * `key_point_summary`: (string) 【最重要的欄位】請為這個錯誤點提煉一個「錯誤焦點」。這不是一個普通的標題，而是一個能讓學生立刻回憶起錯誤的、精簡的提示。請嚴格模仿下方的範例格式：
-            - 如果是介系詞錯誤，範例：`"on" the other hand`
+            - 如果是介系詞錯誤，範例：`"on" the table`
             - 如果是動詞時態/形式錯誤，範例：`strive "to V"` 或 `be used "to V-ing"`
             - 如果是特定文法結構，範例：`強調句構 (It is... that...)`
             - 如果是單字拼寫錯誤，範例：`"tomorrow" (拼寫)`
-        * `error_type`: (string) `文法錯誤`, `單字選擇`, `慣用語不熟`, `語氣不當`, `句構問題`, `拼寫錯誤`, `贅字或漏字`。
-        * `error_subtype`: (string) 2-5 個字的專業術語。
+        * `error_type`: (string) 【極重要】你「必須」從以下三個層級中選擇一個最貼切的分類：
+            1.  `詞彙與片語層級 (Lexical & Phrasal)`: 關乎單一詞彙或固定搭配的錯誤。
+                - 範疇: 固定搭配 (Collocations), 介係詞 (Prepositions), 近義詞混淆 (Word Choice), 中式直譯 (Chinglish)。
+                - 範例: 'make' a suggestion, 'heavy' rain, 'interested' in, 'lend' vs 'borrow'。
+            2.  `語法結構層級 (Grammatical & Structural)`: 關乎句子組織方式和文法規則的錯誤。
+                - 範疇: 時態 (Tenses), 主謂一致 (Subject-Verb Agreement), 冠詞 (Articles), 複數 (Plurals), 句子結構不完整。
+                - 範例: He 'likes' (非 like), 'an' apple (非 a apple), 'watched' (非 watch)。
+            3.  `語意與語用層級 (Semantic & Pragmatic)`: 關乎語言的自然度、得體性和文化慣例的錯誤。
+                - 範疇: 語氣與正式度 (Tone & Formality), 冗餘 (Redundancy), 文化慣用法 (Idioms & Culture)。
+                - 範例: 在商業郵件中使用 'Hey dude'，或直譯中文的客套話。
+        * `error_subtype`: (string) 2-5 個字的具體錯誤類型，例如：`介係詞搭配`, `時態錯誤`, `主謂不一致`, `語氣過於口語`。
         * `original_phrase`: (string) 從學生答案中，精確地提取出錯誤的那個單字或片語。
         * `correction`: (string) 針對該錯誤片語，提供正確的寫法。
-        * `explanation`: (string) 簡潔地解釋為什麼這是錯的。
+        * `explanation`: (string) 簡潔地解釋為什麼這是錯的，並點出所屬的分類概念。
         * `severity`: (string) `major` 或 `minor`。
     """
 
@@ -194,6 +204,7 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
         - **核心複習觀念: "{review_context}"**
 
         請在你的 JSON 回覆中，務必包含一個名為 `did_master_review_concept` 的布林值欄位，用來明確回答「學生的翻譯是否正確地應用了上述的核心複習觀念？」。
+        特別注意：如果的核心觀念正確，但有其他小錯誤，仍然需要回傳 `did_master_review_concept: true`。
 
         **你的次要任務：**
         在完成首要任務後，請對學生的整個句子進行常規的錯誤分析，並將結果填入 `error_analysis` 列表中。
@@ -231,12 +242,12 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
     user_prompt = f"這是我的翻譯：「{user_translation}」。請根據你的專業知識和上述指令，為我生成一份鉅細靡遺的 JSON 分析報告。"
 
     if MONITOR_MODE:
-        print("\n" + "="*20 + " AI 批改 (v5.16) INPUT " + "="*20)
+        print("\n" + "="*20 + " AI 批改 (v5.17 分類優化版) INPUT " + "="*20)
         print("--- SYSTEM PROMPT ---")
         print(system_prompt)
         print("\n--- USER PROMPT ---")
         print(user_prompt)
-        print("="*65 + "\n")
+        print("="*75 + "\n")
 
     try:
         response = client.chat.completions.create(
