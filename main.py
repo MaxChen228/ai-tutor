@@ -586,16 +586,15 @@ def get_daily_activity(year, month):
     # 將查詢結果轉換為 App 更易於使用的 { "YYYY-MM-DD": count } 格式
     heatmap_data = {activity['activity_date'].isoformat(): activity['activity_count'] for activity in activities}
     return heatmap_data
-
 def get_daily_details(activity_date):
     """
-    【v5.15 新增】: 查詢特定日期的總學習時間和所學知識點列表。
+    【v5.15.1 改造】: 將單日學習的知識點，區分為「已複習」和「新學習」兩類。
     """
     conn = get_db_connection()
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        # 查詢該日期的所有學習事件，獲取 feedback JSON 和 response_time
+        # 【核心修改】: 在查詢時，額外獲取 question_type 欄位
         query = """
-        SELECT ai_feedback_json, response_time
+        SELECT question_type, ai_feedback_json, response_time
         FROM learning_events
         WHERE DATE(timestamp AT TIME ZONE 'UTC' + INTERVAL '8 hours') = %s;
         """
@@ -604,37 +603,43 @@ def get_daily_details(activity_date):
     conn.close()
 
     total_seconds = 0
-    learned_points = {} # 使用字典來統計每個知識點的學習次數
+    # 【核心修改】: 準備兩個獨立的字典來分別統計
+    reviewed_points = {}
+    new_points = {}
 
     for event in events:
-        # 累加學習時間 (假設 response_time 存在且為秒)
+        # 累加學習時間 (邏輯不變)
         if event['response_time']:
             try:
                 total_seconds += float(event['response_time'])
             except (ValueError, TypeError):
-                pass # 忽略無效的 response_time
+                pass
 
         # 從 JSON 中解析出學習過的知識點
         if event['ai_feedback_json']:
             try:
                 feedback = json.loads(event['ai_feedback_json'])
-                # 我們只關心答錯時記錄的知識點
                 if not feedback.get('is_generally_correct') and feedback.get('error_analysis'):
                     for error in feedback['error_analysis']:
                         summary = error.get('key_point_summary')
                         if summary:
-                            # 如果這個知識點已在字典中，次數+1，否則新增進去
-                            learned_points[summary] = learned_points.get(summary, 0) + 1
+                            # 【核心修改】: 根據 question_type，將知識點放入對應的字典
+                            if event['question_type'] == 'review':
+                                reviewed_points[summary] = reviewed_points.get(summary, 0) + 1
+                            else: # 預設 'new' 或其他類型都歸為新學習
+                                new_points[summary] = new_points.get(summary, 0) + 1
             except json.JSONDecodeError:
                 continue
     
-    # 將字典轉換為 App 需要的列表格式
-    # [ { "summary": "...", "count": 2 }, ... ]
-    formatted_points = [{"summary": summary, "count": count} for summary, count in learned_points.items()]
+    # 將兩個字典分別轉換為 App 需要的列表格式
+    formatted_reviewed = [{"summary": summary, "count": count} for summary, count in reviewed_points.items()]
+    formatted_new = [{"summary": summary, "count": count} for summary, count in new_points.items()]
     
+    # 【核心修改】: 在回傳的 JSON 中，提供兩個獨立的列表
     return {
         "total_learning_time_seconds": int(total_seconds),
-        "learned_knowledge_points": formatted_points
+        "reviewed_knowledge_points": formatted_reviewed,
+        "new_knowledge_points": formatted_new
     }
 
 if __name__ == '__main__':
