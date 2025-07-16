@@ -1,106 +1,116 @@
 # app/routes/session.py
 
 from flask import Blueprint, request, jsonify
-from app.services import database as db
-from app.services import ai_service as ai
-import random
+from app.services import ai_service, database as db
 
 session_bp = Blueprint('session_bp', __name__)
 
 @session_bp.route("/start_session", methods=['GET'])
 def start_session_endpoint():
     """
-    【v5.16 重構版】: 負責開始一輪新的學習。
+    開始一個新的學習回合，包含複習題與新題目。
+    現在會接收前端指定的出題模型。
     """
-    print("\n[API] 收到請求：開始新的一輪學習...")
-    
     try:
-        desired_review_count = int(request.args.get('num_review', '3'))
-        desired_new_count = int(request.args.get('num_new', '2'))
-        difficulty = int(request.args.get('difficulty', '3'))
+        num_review = int(request.args.get('num_review', 2))
+        num_new = int(request.args.get('num_new', 1))
+        difficulty = int(request.args.get('difficulty', 3))
         length = request.args.get('length', 'medium')
-    except ValueError:
-        desired_review_count, desired_new_count, difficulty, length = 3, 2, 3, 'medium'
-
-    print(f"[API] App 請求參數: 複習={desired_review_count}, 全新={desired_new_count}, 難度={difficulty}, 長度={length}")
-    
-    questions_to_ask = []
-
-    if desired_review_count > 0:
-        due_knowledge_points = db.get_due_knowledge_points(desired_review_count)
-        actual_num_review = len(due_knowledge_points)
-        print(f"[API] 從資料庫中找到 {actual_num_review} 題到期的複習題。")
+        generation_model = request.args.get('generation_model', 'gemini-1.5-flash-latest')
         
-        if actual_num_review > 0:
-            weak_points_for_prompt = [
-                f"- 錯誤分類: {p['category']} -> {p['subcategory']}\n  正確用法: \"{p['correct_phrase']}\"\n  核心觀念: {p['explanation']}"
-                for p in due_knowledge_points
-            ]
-            weak_points_str = "\n\n".join(weak_points_for_prompt)
-            review_questions = ai.generate_question_batch(weak_points_str, actual_num_review)
-            if review_questions:
-                for q, point in zip(review_questions, due_knowledge_points):
-                    if isinstance(q, dict):
-                        q['type'] = 'review'
-                        q['knowledge_point_id'] = point['id']
-                        q['mastery_level'] = point['mastery_level']
-                questions_to_ask.extend(review_questions)
+        print(f"\n[Session] 收到新回合請求: {num_review} 複習, {num_new} 新題 (出題模型: {generation_model})")
 
-    if desired_new_count > 0:
-        print(f"[API] 準備生成 {desired_new_count} 個全新挑戰...")
-        new_questions = ai.generate_new_question_batch(desired_new_count, difficulty, length)
-        if new_questions:
-            for q in new_questions:
-                 if isinstance(q, dict):
-                    q['type'] = 'new'
-            questions_to_ask.extend(new_questions)
-    
-    if not questions_to_ask:
-        print("[API] 本次請求無題目生成。")
-        return jsonify({"questions": []})
+        all_questions = []
         
-    random.shuffle(questions_to_ask)
-    print(f"[API] 已成功生成 {len(questions_to_ask)} 題，準備回傳給 App。")
-    return jsonify({"questions": questions_to_ask})
+        # 1. 獲取複習題
+        if num_review > 0:
+            due_points = db.get_due_knowledge_points(limit=num_review)
+            if due_points:
+                weak_points_str = "\n".join([f"- {p['correct_phrase']} (上次熟練度: {p['mastery_level']:.2f})" for p in due_points])
+                review_questions_data = ai_service.generate_question_batch(weak_points_str, len(due_points), generation_model)
+                
+                if review_questions_data:
+                    for i, q_data in enumerate(review_questions_data):
+                        original_point = due_points[i]
+                        q_data['type'] = 'review'
+                        q_data['knowledge_point_id'] = original_point['id']
+                        q_data['mastery_level'] = original_point['mastery_level']
+                        q_data['original_mistake_id'] = original_point['id']
+                    all_questions.extend(review_questions_data)
+
+        # 2. 獲取新題目
+        if num_new > 0:
+            new_questions_data = ai_service.generate_new_question_batch(num_new, difficulty, length, generation_model)
+            if new_questions_data:
+                for q_data in new_questions_data:
+                    q_data['type'] = 'new'
+                all_questions.extend(new_questions_data)
+        
+        if not all_questions:
+            # 即使沒題目，也回傳一個空的成功回應，避免前端出錯
+            return jsonify({"questions": []})
+
+        return jsonify({"questions": all_questions})
+    except Exception as e:
+        print(f"[/start_session] 發生嚴重錯誤: {e}")
+        return jsonify({"error": "伺服器在準備題目時發生未知錯誤。"}), 500
+
 
 @session_bp.route("/submit_answer", methods=['POST'])
 def submit_answer_endpoint():
     """
-    【v5.16 智慧提示版】: 接收 hint_text 並傳遞給批改服務。
+    提交使用者答案，進行批改並更新資料庫。
+    現在會接收前端指定的批改模型。
     """
-    print("\n[API] 收到請求：批改使用者答案...")
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "請求格式錯誤，需要 JSON 資料。"}), 400
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({"error": "無效的請求，需要 JSON 資料。"}), 400
 
-    question_data = data.get('question_data')
-    user_answer = data.get('user_answer')
+        question_data = data.get('question_data')
+        user_answer = data.get('user_answer')
+        
+        # 【修正核心】獲取批改模型，並在呼叫時傳入
+        grading_model = data.get('grading_model', 'gemini-1.5-pro-latest')
+        
+        print(f"\n[Session] 收到答案提交 (批改模型: {grading_model})")
 
-    if not question_data or user_answer is None:
-        return jsonify({"error": "請求資料不完整，需要 'question_data' 和 'user_answer'。"}), 400
+        is_review = question_data.get('type') == 'review'
+        review_context = question_data.get('hint_text') if is_review else None
+        hint_text = question_data.get('hint_text')
 
-    sentence = question_data.get('new_sentence', '（題目獲取失敗）')
-    hint_text = question_data.get('hint_text') # 【新增】接收 hint_text
+        # 【修正核心】將 grading_model 作為第五個參數傳入
+        feedback = ai_service.get_tutor_feedback(
+            chinese_sentence=question_data.get('new_sentence'), 
+            user_translation=user_answer, 
+            review_context=review_context, 
+            hint_text=hint_text, 
+            model_name=grading_model
+        )
 
-    review_concept_to_check = None
-    if question_data.get('type') == 'review':
-        try:
-            point_id_to_check = int(question_data.get('knowledge_point_id'))
-            review_concept_to_check = db.get_knowledge_point_phrase(point_id_to_check)
-        except (TypeError, ValueError):
-            print(f"[API] 警告：收到的 knowledge_point_id 無效。")
-            pass
-
-    # 【修改】將 hint_text 傳遞給批改函式
-    feedback_data = ai.get_tutor_feedback(sentence, user_answer, review_context=review_concept_to_check, hint_text=hint_text)
-
-    if review_concept_to_check and feedback_data.get('did_master_review_concept'):
-        print(f"[API] 核心觀念 '{review_concept_to_check}' 複習成功！")
-        point_id = question_data.get('knowledge_point_id')
-        mastery = question_data.get('mastery_level')
-        if point_id is not None and mastery is not None:
-            db.update_knowledge_point_mastery(point_id, mastery)
-    
-    db.add_mistake(question_data, user_answer, feedback_data, exclude_phrase=review_concept_to_check)
-    
-    return jsonify(feedback_data)
+        is_correct = feedback.get('is_generally_correct', False)
+        
+        if is_review:
+            if feedback.get('did_master_review_concept', False):
+                print(f"[Session] 複習題 ID {question_data.get('knowledge_point_id')} 核心概念答對，更新熟練度。")
+                db.update_knowledge_point_mastery(question_data.get('knowledge_point_id'), question_data.get('mastery_level', 0))
+                # 即使有其他小錯，只要核心概念答對，就視為答對
+                is_correct = True
+            else:
+                print(f"[Session] 複習題 ID {question_data.get('knowledge_point_id')} 核心概念答錯。")
+                is_correct = False
+        
+        # 只要答案不完全正確，且 AI 有分析出錯誤點，就記錄下來
+        if not is_correct and feedback.get('error_analysis'):
+            exclude_phrase = review_context if is_review else None
+            print(f"[Session] 發現新錯誤，準備寫入資料庫 (排除: {exclude_phrase})。")
+            db.add_mistake(question_data, user_answer, feedback, exclude_phrase)
+        elif not is_correct:
+            # 即使 AI 沒分析出錯誤，但判定為錯，還是要記錄學習事件
+            print("[Session] 答案被判定為錯誤，但 AI 未提供具體錯誤分析，僅記錄事件。")
+            db.add_mistake(question_data, user_answer, feedback)
+            
+        return jsonify(feedback)
+    except Exception as e:
+        print(f"[/submit_answer] 發生嚴重錯誤: {e}")
+        return jsonify({"error": "伺服器在批改答案時發生未知錯誤。"}), 500
