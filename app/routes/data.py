@@ -143,3 +143,35 @@ def get_archived_knowledge_points_endpoint():
     except Exception as e:
         print(f"[API] 獲取已封存知識點時發生錯誤: {e}")
         return jsonify({"error": str(e)}), 500
+    
+
+@data_bp.route("/knowledge_points/batch_action", methods=['POST'])
+def batch_action_knowledge_points_endpoint():
+    """
+    批次處理多個知識點。
+    預期請求 Body: { "action": "archive" | "unarchive", "ids": [1, 2, 3] }
+    """
+    data = request.get_json()
+    if not data or "action" not in data or "ids" not in data:
+        return jsonify({"error": "請求格式錯誤，需要 'action' 和 'ids' 欄位。"}), 400
+
+    action = data["action"]
+    point_ids = data["ids"]
+
+    if not isinstance(point_ids, list) or not point_ids:
+        return jsonify({"error": "'ids' 必須是一個非空的 ID 列表。"}), 400
+
+    print(f"[API] 收到批次請求: 動作='{action}', IDs={point_ids}")
+
+    updated_count = 0
+    if action == "archive":
+        updated_count = db.batch_update_knowledge_points_archived_status(point_ids, True)
+    elif action == "unarchive":
+        updated_count = db.batch_update_knowledge_points_archived_status(point_ids, False)
+    else:
+        return jsonify({"error": f"不支援的動作: {action}"}), 400
+
+    return jsonify({
+        "message": f"動作 '{action}' 執行完畢。",
+        "updated_count": updated_count
+    })

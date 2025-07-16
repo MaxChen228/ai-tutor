@@ -403,3 +403,21 @@ def get_flashcards_by_types(types_to_fetch):
                     "category": error_type
                 })
     return flashcards
+
+
+def batch_update_knowledge_points_archived_status(point_ids, is_archived):
+    """
+    根據 ID 列表，批次更新多個知識點的封存狀態。
+    """
+    if not point_ids:
+        return 0  # 如果傳入空的 ID 列表，直接返回
+
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        # 使用 ANY(%s) 語法可以高效地處理 ID 列表
+        query = "UPDATE knowledge_points SET is_archived = %s WHERE id = ANY(%s)"
+        cursor.execute(query, (is_archived, point_ids))
+        updated_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return updated_rows
