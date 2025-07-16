@@ -7,6 +7,8 @@ import psycopg2 # 引入 PostgreSQL 驅動
 import psycopg2.extras # 引入用於字典 cursor 的額外功能
 from prompt_assets import EXAMPLE_SENTENCE_BANK # 【新增】引入我們的「彈藥庫」
 
+
+
 # --- 核心學習參數 (可調整) ---
 # 這兩個參數現在主要用於本地端測試，線上服務由 App 傳入為準
 SESSION_SIZE = 2
