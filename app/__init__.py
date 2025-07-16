@@ -17,7 +17,8 @@ def create_app():
     from .routes.session import session_bp
     from .routes.data import data_bp
     
-    app.register_blueprint(session_bp)
-    app.register_blueprint(data_bp)
+    # 【修改】為所有 API 路由加上 /api 前綴
+    app.register_blueprint(session_bp, url_prefix='/api')
+    app.register_blueprint(data_bp, url_prefix='/api')
     
     return app
