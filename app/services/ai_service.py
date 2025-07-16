@@ -30,7 +30,7 @@ try:
         genai.configure(api_key=gemini_api_key)
         # 設定 generation_config 以確保回傳的是 JSON
         gemini_model = genai.GenerativeModel(
-            'gemini-1.5-flash',
+            'gemini-2.5-pro',
             generation_config=genai.GenerationConfig(
                 response_mime_type="application/json"
             )
