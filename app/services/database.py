@@ -57,9 +57,25 @@ def init_db():
             mistake_count INTEGER DEFAULT 0,
             correct_count INTEGER DEFAULT 0,
             last_reviewed_on TIMESTAMPTZ,
-            next_review_date DATE
+            next_review_date DATE,
+            is_archived BOOLEAN DEFAULT FALSE
         );
         """)
+        
+        # 【新增】檢查 is_archived 欄位是否存在，如果不存在就加上
+        cursor.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='knowledge_points' AND column_name='is_archived'
+            ) THEN
+                ALTER TABLE knowledge_points ADD COLUMN is_archived BOOLEAN DEFAULT FALSE;
+                RAISE NOTICE '欄位 is_archived 已成功加入 knowledge_points 表格。';
+            END IF;
+        END $$;
+        """)
+
     conn.commit()
     conn.close()
     print("資料庫表格已準備就緒。")
@@ -194,7 +210,7 @@ def get_due_knowledge_points(limit):
         cursor.execute(
             """
             SELECT * FROM knowledge_points 
-            WHERE next_review_date <= %s 
+            WHERE next_review_date <= %s AND is_archived = FALSE
             ORDER BY mastery_level ASC, last_reviewed_on ASC
             LIMIT %s
             """,
@@ -254,7 +270,57 @@ def get_daily_details(activity_date):
     formatted_new = [{"summary": s, "count": c} for s, c in new_points.items()]
     return {"total_learning_time_seconds": int(total_seconds), "reviewed_knowledge_points": formatted_reviewed, "new_knowledge_points": formatted_new}
 
-# --- 【新增】路由檔案需要用到的輔助查詢函式 ---
+# --- 【v5.17 新增】管理知識點專用的函式 ---
+
+def update_knowledge_point_details(point_id, details):
+    """更新單一知識點的詳細資訊。"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        # 這裡可以根據前端傳來的 `details` dictionary 動態建立 UPDATE 語句
+        # 為了安全起見，我們先只允許更新特定欄位
+        allowed_fields = ['correct_phrase', 'explanation', 'key_point_summary', 'category', 'subcategory']
+        update_fields = []
+        update_values = []
+        
+        for key, value in details.items():
+            if key in allowed_fields:
+                update_fields.append(f"{key} = %s")
+                update_values.append(value)
+        
+        if not update_fields:
+            return False, "沒有任何允許更新的欄位。"
+
+        update_values.append(point_id)
+        query = f"UPDATE knowledge_points SET {', '.join(update_fields)} WHERE id = %s"
+        
+        cursor.execute(query, tuple(update_values))
+        updated_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return updated_rows > 0, f"成功更新 {updated_rows} 個知識點。"
+
+def set_knowledge_point_archived_status(point_id, is_archived):
+    """設定知識點的封存狀態。"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("UPDATE knowledge_points SET is_archived = %s WHERE id = %s", (is_archived, point_id))
+        updated_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return updated_rows > 0
+
+def delete_knowledge_point(point_id):
+    """根據 ID 刪除一個知識點。"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("DELETE FROM knowledge_points WHERE id = %s", (point_id,))
+        deleted_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return deleted_rows > 0
+
+
+# --- 【v5.17 修改】路由檔案需要用到的輔助查詢函式 ---
 
 def get_knowledge_point_phrase(point_id):
     """根據 ID 獲取單一知識點的 correct_phrase。"""
@@ -266,16 +332,40 @@ def get_knowledge_point_phrase(point_id):
     return result[0] if result else None
 
 def get_all_knowledge_points():
-    """獲取所有知識點，用於儀表板。"""
+    """獲取所有未封存的知識點，用於儀表板。"""
     conn = get_db_connection()
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
         cursor.execute("""
-            SELECT category, subcategory, correct_phrase, explanation, 
+            SELECT id, category, subcategory, correct_phrase, explanation, 
                    user_context_sentence, incorrect_phrase_in_context, 
                    key_point_summary, mastery_level, mistake_count, 
                    correct_count, next_review_date 
             FROM knowledge_points 
+            WHERE is_archived = FALSE
             ORDER BY mastery_level ASC, mistake_count DESC
+        """)
+        points_raw = cursor.fetchall()
+    conn.close()
+    points_dict = []
+    for row in points_raw:
+        row_dict = dict(row)
+        if row_dict.get('next_review_date'):
+            row_dict['next_review_date'] = row_dict['next_review_date'].isoformat()
+        points_dict.append(row_dict)
+    return points_dict
+
+def get_archived_knowledge_points():
+    """獲取所有已封存的知識點。"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        cursor.execute("""
+            SELECT id, category, subcategory, correct_phrase, explanation, 
+                   user_context_sentence, incorrect_phrase_in_context, 
+                   key_point_summary, mastery_level, mistake_count, 
+                   correct_count, next_review_date 
+            FROM knowledge_points 
+            WHERE is_archived = TRUE
+            ORDER BY last_reviewed_on DESC
         """)
         points_raw = cursor.fetchall()
     conn.close()

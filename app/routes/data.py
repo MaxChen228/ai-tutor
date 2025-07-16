@@ -7,14 +7,16 @@ import json
 
 data_bp = Blueprint('data_bp', __name__)
 
+# --- v5.16 儀表板、閃卡、日曆相關路由 ---
+
 @data_bp.route("/get_dashboard", methods=['GET'])
 def get_dashboard_endpoint():
     """
-    【v5.16 重構版】: 獲取知識點儀表板數據。
+    獲取知識點儀表板數據 (未封存的)。
     """
     print("\n[API] 收到請求：獲取知識點儀表板數據...")
     try:
-        points_dict = db.get_all_knowledge_points() # 假設 db 有一個新函式
+        points_dict = db.get_all_knowledge_points()
         return jsonify({"knowledge_points": points_dict})
     except Exception as e:
         print(f"[API] 獲取儀表板數據時發生嚴重錯誤: {e}")
@@ -23,7 +25,7 @@ def get_dashboard_endpoint():
 @data_bp.route("/get_flashcards", methods=['GET'])
 def get_flashcards_endpoint():
     """
-    【v5.16 重構版】: 根據錯誤類型獲取單字卡數據。
+    根據錯誤類型獲取單字卡數據。
     """
     print("\n[API] 收到請求：獲取單字卡數據...")
     types_str = request.args.get('types', '')
@@ -34,7 +36,7 @@ def get_flashcards_endpoint():
     print(f"[API] 準備查詢以下類型的單字卡: {types_to_fetch}")
     
     try:
-        flashcards = db.get_flashcards_by_types(types_to_fetch) # 假設 db 有一個新函式
+        flashcards = db.get_flashcards_by_types(types_to_fetch)
         print(f"[API] 成功提取到 {len(flashcards)} 張不重複的單字卡。")
         return jsonify({"flashcards": flashcards})
     except Exception as e:
@@ -44,7 +46,7 @@ def get_flashcards_endpoint():
 @data_bp.route("/get_calendar_heatmap", methods=['GET'])
 def get_calendar_heatmap_endpoint():
     """
-    【v5.16 重構版】: 提供特定月份的每日學習題數。
+    提供特定月份的每日學習題數。
     """
     print("\n[API] 收到請求：獲取學習日曆熱力圖數據...")
     try:
@@ -68,7 +70,7 @@ def get_calendar_heatmap_endpoint():
 @data_bp.route("/get_daily_details", methods=['GET'])
 def get_daily_details_endpoint():
     """
-    【v5.16 重構版】: 提供特定日期的學習詳情。
+    提供特定日期的學習詳情。
     """
     print("\n[API] 收到請求：獲取單日學習詳情...")
     date_str = request.args.get('date')
@@ -82,4 +84,62 @@ def get_daily_details_endpoint():
         return jsonify(daily_details)
     except Exception as e:
         print(f"[API] 查詢單日詳情時發生錯誤: {e}")
+        return jsonify({"error": str(e)}), 500
+
+# --- 【v5.17 新增】管理知識點的 API ---
+
+@data_bp.route("/knowledge_point/<int:point_id>", methods=['PUT'])
+def update_knowledge_point_endpoint(point_id):
+    """更新一個知識點的詳細資訊。"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "請求中需要包含 JSON 格式的更新資料。"}), 400
+    
+    print(f"[API] 收到請求：更新知識點 ID {point_id}，資料: {data}")
+    success, message = db.update_knowledge_point_details(point_id, data)
+    
+    if success:
+        return jsonify({"message": message})
+    else:
+        return jsonify({"error": message}), 400
+
+@data_bp.route("/knowledge_point/<int:point_id>/archive", methods=['POST'])
+def archive_knowledge_point_endpoint(point_id):
+    """封存一個知識點。"""
+    print(f"[API] 收到請求：封存知識點 ID {point_id}")
+    success = db.set_knowledge_point_archived_status(point_id, True)
+    if success:
+        return jsonify({"message": f"知識點 {point_id} 已成功封存。"})
+    else:
+        return jsonify({"error": f"找不到或無法封存知識點 {point_id}。"}), 404
+
+@data_bp.route("/knowledge_point/<int:point_id>/unarchive", methods=['POST'])
+def unarchive_knowledge_point_endpoint(point_id):
+    """取消封存一個知識點。"""
+    print(f"[API] 收到請求：取消封存知識點 ID {point_id}")
+    success = db.set_knowledge_point_archived_status(point_id, False)
+    if success:
+        return jsonify({"message": f"知識點 {point_id} 已成功取消封存。"})
+    else:
+        return jsonify({"error": f"找不到或無法取消封存知識點 {point_id}。"}), 404
+
+@data_bp.route("/knowledge_point/<int:point_id>", methods=['DELETE'])
+def delete_knowledge_point_endpoint(point_id):
+    """刪除一個知識點。"""
+    print(f"[API] 收到請求：刪除知識點 ID {point_id}")
+    success = db.delete_knowledge_point(point_id)
+    if success:
+        return jsonify({"message": f"知識點 {point_id} 已被永久刪除。"})
+    else:
+        return jsonify({"error": f"找不到或無法刪除知識點 {point_id}。"}), 404
+
+@data_bp.route("/archived_knowledge_points", methods=['GET'])
+def get_archived_knowledge_points_endpoint():
+    """獲取所有已封存的知識點列表。"""
+    print(f"[API] 收到請求：獲取已封存的知識點列表。")
+    try:
+        archived_points = db.get_archived_knowledge_points()
+        return jsonify({"knowledge_points": archived_points})
+    except Exception as e:
+        print(f"[API] 獲取已封存知識點時發生錯誤: {e}")
         return jsonify({"error": str(e)}), 500
