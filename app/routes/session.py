@@ -66,7 +66,7 @@ def start_session_endpoint():
 @session_bp.route("/submit_answer", methods=['POST'])
 def submit_answer_endpoint():
     """
-    【v5.16 重構版】: 負責提交答案並獲取批改回饋。
+    【v5.16 智慧提示版】: 接收 hint_text 並傳遞給批改服務。
     """
     print("\n[API] 收到請求：批改使用者答案...")
     data = request.get_json()
@@ -80,18 +80,19 @@ def submit_answer_endpoint():
         return jsonify({"error": "請求資料不完整，需要 'question_data' 和 'user_answer'。"}), 400
 
     sentence = question_data.get('new_sentence', '（題目獲取失敗）')
+    hint_text = question_data.get('hint_text') # 【新增】接收 hint_text
 
     review_concept_to_check = None
-
     if question_data.get('type') == 'review':
         try:
             point_id_to_check = int(question_data.get('knowledge_point_id'))
-            review_concept_to_check = db.get_knowledge_point_phrase(point_id_to_check) # 假設 db 有一個新函式
+            review_concept_to_check = db.get_knowledge_point_phrase(point_id_to_check)
         except (TypeError, ValueError):
             print(f"[API] 警告：收到的 knowledge_point_id 無效。")
             pass
 
-    feedback_data = ai.get_tutor_feedback(sentence, user_answer, review_context=review_concept_to_check)
+    # 【修改】將 hint_text 傳遞給批改函式
+    feedback_data = ai.get_tutor_feedback(sentence, user_answer, review_context=review_concept_to_check, hint_text=hint_text)
 
     if review_concept_to_check and feedback_data.get('did_master_review_concept'):
         print(f"[API] 核心觀念 '{review_concept_to_check}' 複習成功！")
