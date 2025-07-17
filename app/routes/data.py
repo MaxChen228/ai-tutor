@@ -175,3 +175,45 @@ def batch_action_knowledge_points_endpoint():
         "message": f"動作 '{action}' 執行完畢。",
         "updated_count": updated_count
     })
+
+
+# --- 新增的 API 端點 ---
+@data_bp.route("/knowledge_points/finalize", methods=['POST'])
+def finalize_knowledge_points_endpoint():
+    """
+    接收前端整理好（排序、刪除、合併後）的錯誤分析陣列，
+    並將它們作為正式的知識點存入資料庫。
+    """
+    # 這裡的 user_id 應該從您的認證機制中獲取，例如 g.user_id
+    # 為了範例的完整性，我們暫時 hardcode
+    # user_id = g.user_id 
+    
+    final_errors = request.get_json()
+
+    if not isinstance(final_errors, list):
+        return jsonify({"error": "無效的資料格式，應為一個錯誤列表。"}), 400
+
+    try:
+        question_data = final_errors[0].get('question_context', {}) # 假設前端會把原始問題上下文一起傳來
+        user_answer = final_errors[0].get('user_answer_context', '')
+        
+        # 遍歷前端傳來的列表
+        for error_data in final_errors:
+            # 為了復用 db.add_mistake，我們需要構造一個類似原始 feedback 的結構
+            # 這裡的實作取決於您 db.add_mistake 的具體參數
+            # 假設它需要一個完整的 feedback dict
+            mock_feedback_data = {
+                "is_generally_correct": False,
+                "error_analysis": [error_data] # 將單個錯誤放入分析列表
+            }
+            # 呼叫資料庫服務，將每個錯誤（現在是確認過的知識點）加入資料庫
+            db.add_mistake(question_data, user_answer, mock_feedback_data)
+        
+        return jsonify({
+            "status": "success",
+            "message": f"已成功儲存 {len(final_errors)} 個知識點。"
+        }), 201 # 201 Created
+
+    except Exception as e:
+        print(f"Error in finalize_knowledge_points_endpoint: {e}")
+        return jsonify({"error": "儲存知識點時發生內部錯誤。"}), 500

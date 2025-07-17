@@ -71,7 +71,7 @@ def start_session_endpoint():
 @session_bp.route("/submit_answer", methods=['POST'])
 def submit_answer_endpoint():
     """
-    【vNext 版】: 接收 grading_model 參數。
+    【vNext 版 / 互動式修改】: 接收 grading_model 參數，且不再自動儲存錯誤。
     """
     print("\n[API] 收到請求：批改使用者答案...")
     data = request.get_json()
@@ -98,9 +98,11 @@ def submit_answer_endpoint():
             print(f"[API] 警告：收到的 knowledge_point_id 無效。")
             pass
 
-    # 【修改】將 hint_text 和模型名稱傳遞給批改函式
+    # 將 hint_text 和模型名稱傳遞給批改函式
     feedback_data = ai.get_tutor_feedback(sentence, user_answer, review_context=review_concept_to_check, hint_text=hint_text, model_name=grading_model)
 
+    # 對於複習題，如果答對了核心觀念，我們仍然立即更新其熟練度。
+    # 這與「是否要將新錯誤加入知識庫」是兩件獨立的事。
     if review_concept_to_check and feedback_data.get('did_master_review_concept'):
         print(f"[API] 核心觀念 '{review_concept_to_check}' 複習成功！")
         point_id = question_data.get('knowledge_point_id')
@@ -108,6 +110,7 @@ def submit_answer_endpoint():
         if point_id is not None and mastery is not None:
             db.update_knowledge_point_mastery(point_id, mastery)
     
-    db.add_mistake(question_data, user_answer, feedback_data, exclude_phrase=review_concept_to_check)
+    # 核心修改：移除 db.add_mistake(...) 這一行，不再自動儲存錯誤。
+    # 完整的 feedback_data 將直接回傳給前端，由使用者決定如何處理。
     
     return jsonify(feedback_data)
