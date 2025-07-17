@@ -90,17 +90,34 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
         q_type = question_data.get('type', 'new')
         source_id = question_data.get('original_mistake_id')
         
+        # --- 【修改開始】 ---
+        
+        # 建立一個從 code 到中文名稱的對照表
+        ERROR_CODE_MAP = {
+            "A": "詞彙與片語錯誤",
+            "B": "語法結構錯誤",
+            "C": "語意與語用錯誤",
+            "D": "拼寫與格式錯誤",
+            "E": "系統錯誤"
+        }
+
         primary_error_category = "翻譯正確"
         primary_error_subcategory = "無"
         error_analysis = feedback_data.get('error_analysis', [])
+        
         if error_analysis:
+            # 優先選取主要錯誤，如果沒有，就選取第一個錯誤
             major_errors = [e for e in error_analysis if e.get('severity') == 'major']
-            if major_errors:
-                primary_error_category = major_errors[0].get('error_type', '分類錯誤')
-                primary_error_subcategory = major_errors[0].get('error_subtype', '子分類錯誤')
-            else:
-                primary_error_category = error_analysis[0].get('error_type', '分類錯誤')
-                primary_error_subcategory = error_analysis[0].get('error_subtype', '子分類錯誤')
+            first_error = major_errors[0] if major_errors else error_analysis[0]
+            
+            # 從錯誤中讀取新的 error_type_code
+            primary_error_code = first_error.get('error_type_code')
+            # 使用對照表來取得主要錯誤的分類名稱
+            primary_error_category = ERROR_CODE_MAP.get(primary_error_code, '分類錯誤')
+            # 使用 key_point_summary 作為子分類，因為它最能代表錯誤核心
+            primary_error_subcategory = first_error.get('key_point_summary', '子分類錯誤')
+
+        # --- 【修改結束】 ---
 
         cursor.execute(
             """
@@ -122,8 +139,16 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
                     print(f"  - (忽略已處理的複習點: {exclude_phrase})")
                     continue
                 
-                category = error.get('error_type')
-                subcategory = error.get('error_subtype')
+                # --- 【修改開始】 ---
+                
+                error_code = error.get('error_type_code')
+                # 使用對照表取得分類名稱
+                category = ERROR_CODE_MAP.get(error_code, '分類錯誤')
+                # 使用 key_point_summary 作為子分類
+                subcategory = error.get('key_point_summary', '核心觀念')
+                
+                # --- 【修改結束】 ---
+
                 explanation = error.get('explanation')
                 incorrect_phrase = error.get('original_phrase')
                 summary = error.get('key_point_summary', '核心觀念')
@@ -140,10 +165,11 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
                     cursor.execute(
                         """
                         UPDATE knowledge_points 
-                        SET mistake_count = mistake_count + 1, mastery_level = %s, user_context_sentence = %s, incorrect_phrase_in_context = %s, key_point_summary = %s, last_reviewed_on = %s, next_review_date = %s
+                        SET mistake_count = mistake_count + 1, mastery_level = %s, user_context_sentence = %s, incorrect_phrase_in_context = %s, key_point_summary = %s, last_reviewed_on = %s, next_review_date = %s,
+                        category = %s, subcategory = %s
                         WHERE id = %s
                         """,
-                        (new_mastery_level, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1), point[0])
+                        (new_mastery_level, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1), category, subcategory, point[0])
                     )
                     print(f"  - 已更新弱點：[{summary}]，熟練度下降。")
                 else:
@@ -159,6 +185,7 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
     conn.close()
     if not is_correct:
         print(f"\n(本句主要錯誤已歸檔：{primary_error_category} - {primary_error_subcategory})")
+
 
 def update_knowledge_point_mastery(point_id, current_mastery):
     """更新答對的知識點熟練度。"""
@@ -404,20 +431,3 @@ def get_flashcards_by_types(types_to_fetch):
                 })
     return flashcards
 
-
-def batch_update_knowledge_points_archived_status(point_ids, is_archived):
-    """
-    根據 ID 列表，批次更新多個知識點的封存狀態。
-    """
-    if not point_ids:
-        return 0  # 如果傳入空的 ID 列表，直接返回
-
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        # 使用 ANY(%s) 語法可以高效地處理 ID 列表
-        query = "UPDATE knowledge_points SET is_archived = %s WHERE id = ANY(%s)"
-        cursor.execute(query, (is_archived, point_ids))
-        updated_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
-    return updated_rows
