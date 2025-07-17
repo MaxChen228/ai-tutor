@@ -114,3 +114,41 @@ def submit_answer_endpoint():
     # 完整的 feedback_data 將直接回傳給前端，由使用者決定如何處理。
     
     return jsonify(feedback_data)
+
+@session_bp.route("/get_smart_hint", methods=['POST'])
+def get_smart_hint_endpoint():
+    """
+    【新功能】AI智慧提示 - 根據使用者當前翻譯和題目內容提供引導性提示
+    """
+    print("\n[API] 收到請求：生成AI智慧提示...")
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "請求格式錯誤，需要 JSON 資料。"}), 400
+
+    chinese_sentence = data.get('chinese_sentence')
+    user_current_input = data.get('user_current_input', '')
+    original_hint = data.get('original_hint', '')
+    model_name = data.get('model_name')
+
+    if not chinese_sentence:
+        return jsonify({"error": "請求資料不完整，需要 'chinese_sentence'。"}), 400
+
+    print(f"[API] 正在為句子「{chinese_sentence}」生成智慧提示...")
+    print(f"[API] 使用者當前輸入：「{user_current_input}」")
+    
+    try:
+        smart_hint_response = ai.generate_smart_hint(
+            chinese_sentence=chinese_sentence,
+            user_current_input=user_current_input,
+            original_hint=original_hint,
+            model_name=model_name
+        )
+        
+        return jsonify(smart_hint_response)
+    
+    except Exception as e:
+        print(f"[API] 生成智慧提示時發生錯誤: {e}")
+        return jsonify({
+            "error": f"AI 智慧提示服務暫時無法使用：{str(e)}",
+            "smart_hint": "抱歉，智慧提示功能暫時無法使用。請參考基本提示或稍後再試。"
+        }), 500
