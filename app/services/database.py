@@ -498,3 +498,40 @@ def get_flashcards_by_types(types_to_fetch):
                     "category": error_type
                 })
     return flashcards
+
+def get_daily_learning_events(activity_date):
+    """查詢特定日期的完整學習事件數據，用於AI總結分析。"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        query = """
+        SELECT id, question_type, chinese_sentence, user_answer, is_correct,
+               response_time, error_category, error_subcategory, ai_feedback_json,
+               difficulty, timestamp
+        FROM learning_events
+        WHERE DATE(timestamp AT TIME ZONE 'UTC' + INTERVAL '8 hours') = %s
+        ORDER BY timestamp ASC;
+        """
+        cursor.execute(query, (activity_date,))
+        events = cursor.fetchall()
+    conn.close()
+    
+    # 轉換為字典格式，方便AI處理
+    events_list = []
+    for event in events:
+        event_dict = dict(event)
+        # 解析AI反饋JSON
+        if event_dict['ai_feedback_json']:
+            try:
+                event_dict['ai_feedback'] = json.loads(event_dict['ai_feedback_json'])
+            except json.JSONDecodeError:
+                event_dict['ai_feedback'] = None
+        else:
+            event_dict['ai_feedback'] = None
+        
+        # 格式化時間戳
+        if event_dict['timestamp']:
+            event_dict['timestamp'] = event_dict['timestamp'].isoformat()
+            
+        events_list.append(event_dict)
+    
+    return events_list

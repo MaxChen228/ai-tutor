@@ -274,3 +274,35 @@ def finalize_knowledge_points_endpoint():
     except Exception as e:
         print(f"Error in finalize_knowledge_points_endpoint: {e}")
         return jsonify({"error": "儲存知識點時發生內部錯誤。"}), 500
+
+@data_bp.route("/generate_daily_summary", methods=['GET'])
+def generate_daily_summary_endpoint():
+    """
+    生成指定日期的AI學習總結。
+    """
+    print("\n[API] 收到請求：生成AI當日學習總結...")
+    date_str = request.args.get('date')
+    if not date_str:
+        return jsonify({"error": "請提供日期參數 (date=YYYY-MM-DD)。"}), 400
+    
+    print(f"[API] 正在為日期 {date_str} 生成AI總結...")
+    
+    try:
+        # 1. 獲取當日的詳細學習數據
+        daily_details = db.get_daily_details(date_str)
+        
+        # 2. 獲取當日的學習事件原始數據（用於更深入的分析）
+        learning_events = db.get_daily_learning_events(date_str)
+        
+        # 3. 調用AI服務生成智能總結
+        summary_result = ai.generate_daily_learning_summary(
+            date_str, 
+            daily_details, 
+            learning_events
+        )
+        
+        return jsonify(summary_result)
+        
+    except Exception as e:
+        print(f"[API] 生成AI總結時發生錯誤: {e}")
+        return jsonify({"error": str(e)}), 500

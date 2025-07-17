@@ -395,3 +395,129 @@ def ai_review_knowledge_point(knowledge_point_data, model_name=None):
             "recommended_category": knowledge_point_data.get('category', 'N/A'),
             "additional_examples": []
         }
+    
+
+def generate_daily_learning_summary(date_str, daily_details, learning_events, model_name=None):
+    """
+    使用AI生成指定日期的個人化學習總結。
+    
+    Args:
+        date_str (str): 日期字符串 (YYYY-MM-DD)
+        daily_details (dict): 當日學習統計數據
+        learning_events (list): 當日詳細學習事件列表
+        model_name (str): 使用的AI模型名稱
+    
+    Returns:
+        dict: 包含AI總結的完整數據
+    """
+    
+    if not learning_events:
+        return {
+            "summary": "今天沒有學習紀錄。明天是新的開始，一起加油吧！",
+            "key_achievements": [],
+            "improvement_suggestions": ["開始您的第一道翻譯練習"],
+            "motivational_message": "每一次學習都是進步的開始。"
+        }
+    
+    # 準備學習數據摘要
+    total_questions = len(learning_events)
+    correct_questions = len([e for e in learning_events if e.get('is_correct')])
+    accuracy_rate = (correct_questions / total_questions * 100) if total_questions > 0 else 0
+    
+    # 分析錯誤模式
+    error_patterns = {}
+    common_mistakes = []
+    
+    for event in learning_events:
+        if event.get('ai_feedback') and event['ai_feedback'].get('error_analysis'):
+            for error in event['ai_feedback']['error_analysis']:
+                error_type = error.get('error_type_code', 'Unknown')
+                if error_type not in error_patterns:
+                    error_patterns[error_type] = []
+                error_patterns[error_type].append(error.get('key_point_summary', ''))
+                
+                if error.get('severity') == 'major':
+                    common_mistakes.append(error.get('key_point_summary', ''))
+    
+    # 準備給AI的提示
+    system_prompt = """
+    你是一位專業的英語學習顧問和教學專家。
+    你的任務是為學習者生成一份個人化、溫暖且具有建設性的每日學習總結。
+    
+    總結要求：
+    1. 語氣溫暖鼓勵，就像一位關心學生的老師
+    2. 重點關注進步和亮點，即使成績不理想也要找到正面的地方
+    3. 提供具體、實用的改進建議
+    4. 使用繁體中文
+    5. 保持專業性的同時要有人文關懷
+    
+    輸出格式（JSON）：
+    {
+        "summary": "整體學習情況的溫暖總結（150-200字）",
+        "key_achievements": ["今日亮點1", "今日亮點2", "今日亮點3"],
+        "improvement_suggestions": ["具體建議1", "具體建議2", "具體建議3"],
+        "motivational_message": "溫暖的激勵話語（50字內）"
+    }
+    """
+    
+    user_prompt = f"""
+    請為以下學習數據生成一份溫暖的每日總結：
+    
+    【基本數據】
+    日期：{date_str}
+    練習題數：{total_questions} 題
+    答對題數：{correct_questions} 題
+    正確率：{accuracy_rate:.1f}%
+    學習時長：{daily_details.get('total_learning_time_seconds', 0)} 秒
+    
+    【知識點掌握情況】
+    複習知識點：{len(daily_details.get('reviewed_knowledge_points', []))} 個
+    新學知識點：{len(daily_details.get('new_knowledge_points', []))} 個
+    
+    【錯誤分析】
+    主要錯誤類型分布：{dict([(k, len(v)) for k, v in error_patterns.items()])}
+    常見錯誤知識點：{common_mistakes[:5]}  # 只顯示前5個
+    
+    【學習事件概要】
+    總共有 {len([e for e in learning_events if e.get('question_type') == 'review'])} 道複習題
+    總共有 {len([e for e in learning_events if e.get('question_type') == 'new'])} 道新題目
+    
+    請基於以上數據，生成一份既專業又溫暖的學習總結，重點關注學習者的進步和成長。
+    """
+    
+    try:
+        summary_result = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        
+        if MONITOR_MODE:
+            print("\n" + "="*20 + " AI 每日總結生成結果 " + "="*20)
+            print(json.dumps(summary_result, ensure_ascii=False, indent=2))
+            print("="*60 + "\n")
+        
+        # 確保返回的數據結構正確
+        if not isinstance(summary_result, dict):
+            raise ValueError("AI返回的數據格式不正確")
+        
+        required_fields = ['summary', 'key_achievements', 'improvement_suggestions', 'motivational_message']
+        for field in required_fields:
+            if field not in summary_result:
+                summary_result[field] = f"AI未能生成{field}內容"
+        
+        return summary_result
+        
+    except Exception as e:
+        print(f"AI生成每日總結時發生錯誤: {e}")
+        # 返回備用總結
+        return {
+            "summary": f"今天您完成了 {total_questions} 道練習，正確率為 {accuracy_rate:.1f}%。每一次的練習都是進步的積累，繼續保持這樣的學習節奏！",
+            "key_achievements": [
+                f"完成了 {total_questions} 道翻譯練習" if total_questions > 0 else "開始了新的學習嘗試",
+                f"正確率達到 {accuracy_rate:.1f}%" if accuracy_rate > 0 else "勇於嘗試新挑戰",
+                "持續投入英語學習"
+            ],
+            "improvement_suggestions": [
+                "建議定期複習錯誤的知識點",
+                "可以嘗試增加練習的多樣性",
+                "保持每日學習的好習慣"
+            ],
+            "motivational_message": "學習是一個持續的過程，每一步都很重要。繼續加油！"
+        }
