@@ -10,7 +10,7 @@ session_bp = Blueprint('session_bp', __name__)
 @session_bp.route("/start_session", methods=['GET'])
 def start_session_endpoint():
     """
-    【v5.16 重構版】: 負責開始一輪新的學習。
+    【vNext 版】: 接收 generation_model 參數。
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
     
@@ -19,10 +19,13 @@ def start_session_endpoint():
         desired_new_count = int(request.args.get('num_new', '2'))
         difficulty = int(request.args.get('difficulty', '3'))
         length = request.args.get('length', 'medium')
+        # 【新增】接收出題模型參數
+        generation_model = request.args.get('generation_model') 
     except ValueError:
         desired_review_count, desired_new_count, difficulty, length = 3, 2, 3, 'medium'
+        generation_model = None
 
-    print(f"[API] App 請求參數: 複習={desired_review_count}, 全新={desired_new_count}, 難度={difficulty}, 長度={length}")
+    print(f"[API] App 請求參數: 複習={desired_review_count}, 全新={desired_new_count}, 難度={difficulty}, 長度={length}, 出題模型={generation_model}")
     
     questions_to_ask = []
 
@@ -37,7 +40,8 @@ def start_session_endpoint():
                 for p in due_knowledge_points
             ]
             weak_points_str = "\n\n".join(weak_points_for_prompt)
-            review_questions = ai.generate_question_batch(weak_points_str, actual_num_review)
+            # 【修改】傳入模型名稱
+            review_questions = ai.generate_question_batch(weak_points_str, actual_num_review, model_name=generation_model)
             if review_questions:
                 for q, point in zip(review_questions, due_knowledge_points):
                     if isinstance(q, dict):
@@ -48,7 +52,8 @@ def start_session_endpoint():
 
     if desired_new_count > 0:
         print(f"[API] 準備生成 {desired_new_count} 個全新挑戰...")
-        new_questions = ai.generate_new_question_batch(desired_new_count, difficulty, length)
+        # 【修改】傳入模型名稱
+        new_questions = ai.generate_new_question_batch(desired_new_count, difficulty, length, model_name=generation_model)
         if new_questions:
             for q in new_questions:
                  if isinstance(q, dict):
@@ -66,7 +71,7 @@ def start_session_endpoint():
 @session_bp.route("/submit_answer", methods=['POST'])
 def submit_answer_endpoint():
     """
-    【v5.16 智慧提示版】: 接收 hint_text 並傳遞給批改服務。
+    【vNext 版】: 接收 grading_model 參數。
     """
     print("\n[API] 收到請求：批改使用者答案...")
     data = request.get_json()
@@ -75,12 +80,14 @@ def submit_answer_endpoint():
 
     question_data = data.get('question_data')
     user_answer = data.get('user_answer')
+    # 【新增】從 JSON body 中接收批改模型參數
+    grading_model = data.get('grading_model')
 
     if not question_data or user_answer is None:
         return jsonify({"error": "請求資料不完整，需要 'question_data' 和 'user_answer'。"}), 400
 
     sentence = question_data.get('new_sentence', '（題目獲取失敗）')
-    hint_text = question_data.get('hint_text') # 【新增】接收 hint_text
+    hint_text = question_data.get('hint_text') 
 
     review_concept_to_check = None
     if question_data.get('type') == 'review':
@@ -91,8 +98,8 @@ def submit_answer_endpoint():
             print(f"[API] 警告：收到的 knowledge_point_id 無效。")
             pass
 
-    # 【修改】將 hint_text 傳遞給批改函式
-    feedback_data = ai.get_tutor_feedback(sentence, user_answer, review_context=review_concept_to_check, hint_text=hint_text)
+    # 【修改】將 hint_text 和模型名稱傳遞給批改函式
+    feedback_data = ai.get_tutor_feedback(sentence, user_answer, review_context=review_concept_to_check, hint_text=hint_text, model_name=grading_model)
 
     if review_concept_to_check and feedback_data.get('did_master_review_concept'):
         print(f"[API] 核心觀念 '{review_concept_to_check}' 複習成功！")

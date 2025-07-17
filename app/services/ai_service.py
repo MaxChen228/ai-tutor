@@ -9,38 +9,43 @@ from app.assets import EXAMPLE_SENTENCE_BANK
 
 MONITOR_MODE = True
 
-# --- 環境變數與 API 初始化 ---
+# --- 模型設定與 API 初始化 ---
 
-LLM_PROVIDER = os.environ.get('LLM_PROVIDER', 'OPENAI').upper()
-print(f"[AI Service] 目前使用的 LLM 供應商: {LLM_PROVIDER}")
+# 【vNext 新增】模型註冊表
+# 我們把所有支援的模型統一定義在這裡
+# Key 是給前端顯示和選擇的，Value 是對應的 API model ID
+AVAILABLE_MODELS = {
+    # OpenAI Models
+    "gpt-4o": "openai/gpt-4o",
+    "gpt-4-turbo": "openai/gpt-4-turbo",
+    # Gemini Models
+    "gemini-2.5-pro": "gemini/gemini-1.5-pro-latest", # Gemini 在 API 中通常用 1.5
+    "gemini-2.5-flash": "gemini/gemini-1.5-flash-latest",
+}
+DEFAULT_GENERATION_MODEL = "gemini-2.5-pro"
+DEFAULT_GRADING_MODEL = "gemini-2.5-flash"
+
 
 # OpenAI 初始化
 try:
-    # 僅在環境變數存在時才初始化客戶端
     openai_client = openai.OpenAI() if os.environ.get("OPENAI_API_KEY") else None
 except openai.OpenAIError:
     openai_client = None
-    if LLM_PROVIDER == 'OPENAI':
-        print("警告: LLM_PROVIDER 設定為 OPENAI，但 OPENAI_API_KEY 未設定或無效。")
+    print("警告: OPENAI_API_KEY 未設定或無效。")
 
 # Gemini 初始化
 try:
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
     if gemini_api_key:
         genai.configure(api_key=gemini_api_key)
+        # 移除固定的 model name，讓呼叫時動態決定
         # 設定 generation_config 以確保回傳的是 JSON
-        gemini_model = genai.GenerativeModel(
-            'gemini-2.5-pro',
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json"
-            )
-        )
+        gemini_generation_config = genai.GenerationConfig(response_mime_type="application/json")
     else:
-        gemini_model = None
-        if LLM_PROVIDER == 'GEMINI':
-            print("警告: LLM_PROVIDER 設定為 GEMINI，但 GEMINI_API_KEY 未設定。")
+        gemini_api_key = None
+        print("警告: GEMINI_API_KEY 未設定。")
 except Exception as e:
-    gemini_model = None
+    gemini_api_key = None
     print(f"初始化 Gemini 時發生錯誤: {e}")
 
 # --- 文法書讀取 ---
@@ -53,19 +58,19 @@ except FileNotFoundError:
 
 # --- 私有函式：各模型的具體實現 ---
 
-def _call_openai_api(system_prompt, user_prompt):
+def _call_openai_api(system_prompt, user_prompt, model_id):
     """通用的 OpenAI API 呼叫函式。"""
     if not openai_client:
         raise ValueError("OpenAI API 金鑰未設定或客戶端初始化失敗。")
     
     if MONITOR_MODE:
-        print("\n" + "="*20 + " OpenAI API INPUT " + "="*20)
+        print("\n" + "="*20 + f" OpenAI API INPUT (Model: {model_id}) " + "="*20)
         print("--- SYSTEM PROMPT ---\n" + system_prompt)
         print("\n--- USER PROMPT ---\n" + user_prompt)
         print("="*60 + "\n")
 
     response = openai_client.chat.completions.create(
-        model="gpt-4o",
+        model=model_id, # 使用傳入的 model_id
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -74,23 +79,51 @@ def _call_openai_api(system_prompt, user_prompt):
     )
     return json.loads(response.choices[0].message.content)
 
-def _call_gemini_api(system_prompt, user_prompt):
+def _call_gemini_api(system_prompt, user_prompt, model_id):
     """通用的 Gemini API 呼叫函式。"""
-    if not gemini_model:
+    if not gemini_api_key:
         raise ValueError("Gemini API 金鑰未設定或模型初始化失敗。")
     
-    # Gemini 通常在單一 Prompt 中表現更好，將 system 和 user prompt 合併
+    # 根據 model_id 動態建立模型實例
+    gemini_model = genai.GenerativeModel(
+        model_id,
+        generation_config=gemini_generation_config
+    )
+    
     full_prompt = system_prompt + "\n\n" + user_prompt
 
     if MONITOR_MODE:
-        print("\n" + "="*20 + " Gemini API INPUT " + "="*20)
+        print("\n" + "="*20 + f" Gemini API INPUT (Model: {model_id}) " + "="*20)
         print(full_prompt)
         print("="*60 + "\n")
         
     response = gemini_model.generate_content(full_prompt)
-    # Gemini 的 JSON 輸出有時會包含 markdown，需要清理
-    # 新版的 API 搭配 response_mime_type="application/json" 可以直接回傳 text
     return json.loads(response.text)
+
+def _call_llm_api(system_prompt, user_prompt, model_name, default_model):
+    """【vNext 新增】統一的 LLM 呼叫函式 (Dispatcher)。"""
+    
+    # 如果沒有提供 model_name，就使用預設值
+    model_name = model_name or default_model
+    
+    # 從註冊表中找到對應的 provider 和 model_id
+    full_model_id = AVAILABLE_MODELS.get(model_name)
+    
+    if not full_model_id:
+        print(f"警告：找不到名為 '{model_name}' 的模型，將使用預設模型 '{default_model}'。")
+        full_model_id = AVAILABLE_MODELS[default_model]
+        
+    provider, model_id = full_model_id.split('/', 1)
+    
+    print(f"[AI Service] 正在使用模型: Provider={provider}, Model ID={model_id}")
+
+    if provider == 'gemini':
+        return _call_gemini_api(system_prompt, user_prompt, model_id)
+    elif provider == 'openai':
+        return _call_openai_api(system_prompt, user_prompt, model_id)
+    else:
+        raise ValueError(f"不支援的 LLM 供應商: {provider}")
+
 
 def _normalize_questions_output(response_data):
     """將不同模型的輸出格式統一為問題列表。"""
@@ -98,17 +131,16 @@ def _normalize_questions_output(response_data):
         return response_data["questions"]
     elif isinstance(response_data, list):
          return response_data
-    # 針對 OpenAI 可能出現的非標準格式做相容 (例如根部就是一個 key，其 value 是 list)
     elif isinstance(response_data, dict):
         for value in response_data.values():
             if isinstance(value, list):
                 return value
     return []
 
-# --- 公共函式：供外部呼叫的統一介面 (Dispatcher) ---
+# --- 公共函式：供外部呼叫的統一介面 ---
 
-def generate_question_batch(weak_points_str, num_review):
-    """根據弱點生成複習題 (Dispatcher)。"""
+def generate_question_batch(weak_points_str, num_review, model_name=None):
+    """根據弱點生成複習題。"""
     system_prompt = f"""
         你是一位頂尖的英文教學專家與命題者，專門設計「精準打擊」的複習題。你的核心任務是根據下方一份關於學生的「具體知識點弱點報告」，為他量身打造 {num_review} 題翻譯考題。
         **核心原則**: 1. 精準打擊 2. 情境創造 3. 絕對保密
@@ -123,17 +155,14 @@ def generate_question_batch(weak_points_str, num_review):
         請根據以上報告，為我生成 {num_review} 題翻譯題。請務必記得，你的輸出必須是包含 "questions" key 的 JSON 格式。
         """
     try:
-        if LLM_PROVIDER == 'GEMINI':
-            response_data = _call_gemini_api(system_prompt, user_prompt)
-        else: # 預設使用 OpenAI
-            response_data = _call_openai_api(system_prompt, user_prompt)
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
         return _normalize_questions_output(response_data)
     except Exception as e:
-        print(f"AI 備課時發生錯誤 (複習題) - Provider: {LLM_PROVIDER}, Error: {e}")
+        print(f"AI 備課時發生錯誤 (複習題) - Model: {model_name}, Error: {e}")
         return None
 
-def generate_new_question_batch(num_new, difficulty, length):
-    """生成全新挑戰題 (Dispatcher)。"""
+def generate_new_question_batch(num_new, difficulty, length, model_name=None):
+    """生成全新挑戰題。"""
     patterns_list = [p.strip() for p in translation_patterns.split('* ') if p.strip()]
     sampled_patterns_str = "* " + "\n* ".join(random.sample(patterns_list, min(len(patterns_list), 15))) if patterns_list else "無"
     
@@ -162,18 +191,15 @@ def generate_new_question_batch(num_new, difficulty, length):
     user_prompt = f"請嚴格遵照你的三項核心指令，為我生成 {num_new} 題考題。"
     
     try:
-        if LLM_PROVIDER == 'GEMINI':
-            response_data = _call_gemini_api(system_prompt, user_prompt)
-        else: # 預設使用 OpenAI
-            response_data = _call_openai_api(system_prompt, user_prompt)
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
         return _normalize_questions_output(response_data)
     except Exception as e:
-        print(f"AI 備課時發生錯誤 (新題) - Provider: {LLM_PROVIDER}, Error: {e}")
+        print(f"AI 備課時發生錯誤 (新題) - Model: {model_name}, Error: {e}")
         return None
 
-def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, hint_text=None):
-    """批改使用者答案並提供回饋 (Dispatcher)。"""
-    # 這是兩個 prompt 都會用到的共用說明
+def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, hint_text=None, model_name=None):
+    """批改使用者答案並提供回饋。"""
+    # ... (prompt 內容不變，此處省略) ...
     error_analysis_instructions = """
     4.  `error_analysis`: (array of objects) 一個清單，如果沒有任何錯誤，請回傳一個空清單 `[]`。
         清單中的每一個物件都必須包含以下所有欄位：
@@ -210,13 +236,10 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
     user_prompt = f"這是我的翻譯：「{user_translation}」。請根據你的專業知識和上述指令，為我生成一份鉅細靡遺的 JSON 分析報告。"
 
     try:
-        if LLM_PROVIDER == 'GEMINI':
-            return _call_gemini_api(system_prompt, user_prompt)
-        else: # 預設使用 OpenAI
-            return _call_openai_api(system_prompt, user_prompt)
+        return _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GRADING_MODEL)
     except Exception as e:
-        print(f"AI 批改時發生錯誤 - Provider: {LLM_PROVIDER}, Error: {e}")
+        print(f"AI 批改時發生錯誤 - Model: {model_name}, Error: {e}")
         return {
-            "did_master_review_concept": False, "is_generally_correct": False, "overall_suggestion": f"AI 模型 ({LLM_PROVIDER}) 暫時無法提供服務。",
+            "did_master_review_concept": False, "is_generally_correct": False, "overall_suggestion": f"AI 模型 ({model_name}) 暫時無法提供服務。",
             "error_analysis": [{"error_type": "系統錯誤", "explanation": f"系統無法處理 AI 的回覆：{e}"}]
         }
