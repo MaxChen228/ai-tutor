@@ -1,4 +1,4 @@
-# app/services/ai_service.py
+# ai-tutor/app/services/ai_service.py
 
 import os
 import json
@@ -9,37 +9,27 @@ from app.assets import EXAMPLE_SENTENCE_BANK
 
 MONITOR_MODE = True
 
-# --- 模型設定與 API 初始化 ---
+# --- 模型設定與 API 初始化 (此部分不變) ---
 
-# 【vNext 新增】模型註冊表
-# 我們把所有支援的模型統一定義在這裡
-# Key 是給前端顯示和選擇的，Value 是對應的 API model ID
 AVAILABLE_MODELS = {
-    # OpenAI Models
     "gpt-4o": "openai/gpt-4o",
     "gpt-4-turbo": "openai/gpt-4-turbo",
-    # Gemini Models
-    "gemini-2.5-pro": "gemini/gemini-1.5-pro-latest", # Gemini 在 API 中通常用 1.5
+    "gemini-2.5-pro": "gemini/gemini-1.5-pro-latest",
     "gemini-2.5-flash": "gemini/gemini-1.5-flash-latest",
 }
 DEFAULT_GENERATION_MODEL = "gemini-2.5-pro"
 DEFAULT_GRADING_MODEL = "gemini-2.5-flash"
 
-
-# OpenAI 初始化
 try:
     openai_client = openai.OpenAI() if os.environ.get("OPENAI_API_KEY") else None
 except openai.OpenAIError:
     openai_client = None
     print("警告: OPENAI_API_KEY 未設定或無效。")
 
-# Gemini 初始化
 try:
     gemini_api_key = os.environ.get("GEMINI_API_KEY")
     if gemini_api_key:
         genai.configure(api_key=gemini_api_key)
-        # 移除固定的 model name，讓呼叫時動態決定
-        # 設定 generation_config 以確保回傳的是 JSON
         gemini_generation_config = genai.GenerationConfig(response_mime_type="application/json")
     else:
         gemini_api_key = None
@@ -48,75 +38,56 @@ except Exception as e:
     gemini_api_key = None
     print(f"初始化 Gemini 時發生錯誤: {e}")
 
-# --- 文法書讀取 ---
+# --- 【計畫二修改】讀取新的 JSON 文法庫 ---
 try:
-    with open("翻譯句型.md", "r", encoding="utf-8") as f:
-        translation_patterns = f.read()
+    with open("app/grammar_patterns.json", "r", encoding="utf-8") as f:
+        grammar_patterns = json.load(f)
+    print(f"成功載入 {len(grammar_patterns)} 筆文法句型。")
 except FileNotFoundError:
-    print("錯誤：找不到 `翻譯句型.md` 檔案。")
-    translation_patterns = "（文法書讀取失敗）"
+    print("錯誤：找不到 `app/grammar_patterns.json` 檔案。新題生成功能將受限。")
+    grammar_patterns = []
+except json.JSONDecodeError:
+    print("錯誤：`app/grammar_patterns.json` 格式錯誤，無法解析。")
+    grammar_patterns = []
 
-# --- 私有函式：各模型的具體實現 ---
+
+# --- 私有函式 (此部分不變) ---
 
 def _call_openai_api(system_prompt, user_prompt, model_id):
-    """通用的 OpenAI API 呼叫函式。"""
     if not openai_client:
         raise ValueError("OpenAI API 金鑰未設定或客戶端初始化失敗。")
-    
     if MONITOR_MODE:
         print("\n" + "="*20 + f" OpenAI API INPUT (Model: {model_id}) " + "="*20)
         print("--- SYSTEM PROMPT ---\n" + system_prompt)
         print("\n--- USER PROMPT ---\n" + user_prompt)
         print("="*60 + "\n")
-
     response = openai_client.chat.completions.create(
-        model=model_id, # 使用傳入的 model_id
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
+        model=model_id,
+        messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
         response_format={"type": "json_object"}
     )
     return json.loads(response.choices[0].message.content)
 
 def _call_gemini_api(system_prompt, user_prompt, model_id):
-    """通用的 Gemini API 呼叫函式。"""
     if not gemini_api_key:
         raise ValueError("Gemini API 金鑰未設定或模型初始化失敗。")
-    
-    # 根據 model_id 動態建立模型實例
-    gemini_model = genai.GenerativeModel(
-        model_id,
-        generation_config=gemini_generation_config
-    )
-    
+    gemini_model = genai.GenerativeModel(model_id, generation_config=gemini_generation_config)
     full_prompt = system_prompt + "\n\n" + user_prompt
-
     if MONITOR_MODE:
         print("\n" + "="*20 + f" Gemini API INPUT (Model: {model_id}) " + "="*20)
         print(full_prompt)
         print("="*60 + "\n")
-        
     response = gemini_model.generate_content(full_prompt)
     return json.loads(response.text)
 
 def _call_llm_api(system_prompt, user_prompt, model_name, default_model):
-    """【vNext 新增】統一的 LLM 呼叫函式 (Dispatcher)。"""
-    
-    # 如果沒有提供 model_name，就使用預設值
     model_name = model_name or default_model
-    
-    # 從註冊表中找到對應的 provider 和 model_id
     full_model_id = AVAILABLE_MODELS.get(model_name)
-    
     if not full_model_id:
         print(f"警告：找不到名為 '{model_name}' 的模型，將使用預設模型 '{default_model}'。")
         full_model_id = AVAILABLE_MODELS[default_model]
-        
     provider, model_id = full_model_id.split('/', 1)
-    
     print(f"[AI Service] 正在使用模型: Provider={provider}, Model ID={model_id}")
-
     if provider == 'gemini':
         return _call_gemini_api(system_prompt, user_prompt, model_id)
     elif provider == 'openai':
@@ -124,9 +95,7 @@ def _call_llm_api(system_prompt, user_prompt, model_name, default_model):
     else:
         raise ValueError(f"不支援的 LLM 供應商: {provider}")
 
-
 def _normalize_questions_output(response_data):
-    """將不同模型的輸出格式統一為問題列表。"""
     if isinstance(response_data, dict) and "questions" in response_data and isinstance(response_data["questions"], list):
         return response_data["questions"]
     elif isinstance(response_data, list):
@@ -140,13 +109,12 @@ def _normalize_questions_output(response_data):
 # --- 公共函式：供外部呼叫的統一介面 ---
 
 def generate_question_batch(weak_points_str, num_review, model_name=None):
-    """根據弱點生成複習題。"""
+    """根據弱點生成複習題 (此函式不變)。"""
     system_prompt = f"""
         你是一位頂尖的英文教學專家與命題者，專門設計「精準打擊」的複習題。你的核心任務是根據下方一份關於學生的「具體知識點弱點報告」，為他量身打造 {num_review} 題翻譯考題。
         **核心原則**: 1. 精準打擊 2. 情境創造 3. 絕對保密
         **輸出格式**: 你必須嚴格回傳一個 JSON 物件。根部有一個 "questions" key，其 value 是一個包含 {num_review} 個問題物件的列表。
         每個問題物件必須包含 "new_sentence" (string) 和 "hint_text" (string)。
-        範例: {{"questions": [{{"new_sentence": "這份工作薪水很高，但另一方面...", "hint_text": "on the other hand"}}]}}
         """
     user_prompt = f"""
         **【學生具體知識點弱點報告】**
@@ -161,45 +129,89 @@ def generate_question_batch(weak_points_str, num_review, model_name=None):
         print(f"AI 備課時發生錯誤 (複習題) - Model: {model_name}, Error: {e}")
         return None
 
+# --- 【計畫二修改】重寫生成新題的函式 ---
 def generate_new_question_batch(num_new, difficulty, length, model_name=None):
-    """生成全新挑戰題。"""
-    patterns_list = [p.strip() for p in translation_patterns.split('* ') if p.strip()]
-    sampled_patterns_str = "* " + "\n* ".join(random.sample(patterns_list, min(len(patterns_list), 15))) if patterns_list else "無"
-    
-    example_sentences = EXAMPLE_SENTENCE_BANK.get(length, {}).get(str(difficulty), [])
-    example_sentences_str = "\n".join([f"- {s}" for s in example_sentences]) if example_sentences else "無範例"
-
-    system_prompt = f"""
-    你是一位超級高效的英文命題 AI，任務是為我生成 {num_new} 題翻譯考題。
-    **指令一：模仿風格**
-    你必須深度學習下方的「風格參考範例 (來自難度 {difficulty} / 長度 {length})」，你的出題風格必須與其一致。
-    ---
-    【風格參考範例】
-    {example_sentences_str}
-    ---
-    **指令二：運用句型**
-    你必須從下方的「指定句型庫」中，選擇合適的句型融入題目。
-    ---
-    【指定句型庫】
-    {sampled_patterns_str}
-    ---
-    **指令三：嚴格輸出**
-    你必須嚴格回傳一個 JSON 物件。根部有一個 "questions" key，其 value 是一個包含 {num_new} 個問題物件的列表。
-    每個問題物件必須包含 "new_sentence" (string) 和 "hint_text" (string)。
-    範例: {{"questions": [{{"new_sentence": "再怎麼強調...也不為過。", "hint_text": "再...也不為過: cannot + V + too much / adv."}}]}}
     """
-    user_prompt = f"請嚴格遵照你的三項核心指令，為我生成 {num_new} 題考題。"
-    
+    【vNext 版】根據結構化的文法庫，為每個句型精準生成一個新題目。
+    """
+    if not grammar_patterns:
+        print("錯誤：文法庫為空或載入失敗，無法生成新題目。")
+        return []
+
+    # 1. 從文法庫中隨機選取 num_new 個不重複的句型
     try:
-        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
-        return _normalize_questions_output(response_data)
-    except Exception as e:
-        print(f"AI 備課時發生錯誤 (新題) - Model: {model_name}, Error: {e}")
-        return None
+        selected_patterns = random.sample(grammar_patterns, k=min(num_new, len(grammar_patterns)))
+    except ValueError:
+        return [] # 如果請求的數量大於庫中的數量，返回空
+
+    generated_questions = []
+
+    # 2. 針對每一個選中的句型，單獨呼叫 AI 生成一題
+    for i, pattern_data in enumerate(selected_patterns):
+        print(f"\n[AI Service] 正在為第 {i+1}/{len(selected_patterns)} 個新句型出題...")
+        print(f"  - 目標句型: {pattern_data.get('pattern', 'N/A')}")
+
+        # 準備範例句子，增加 AI 模仿的精準度
+        example_sentences = EXAMPLE_SENTENCE_BANK.get(length, {}).get(str(difficulty), [])
+        example_sentences_str = "\n".join([f"- {s}" for s in example_sentences]) if example_sentences else "無風格參考範例"
+
+        # 3. 建立一個高度聚焦的 Prompt
+        system_prompt = f"""
+        你是一位英文命題專家，你的唯一任務是根據我提供的一個「核心句型」，設計一題高品質的中文翻譯題。
+
+        **指令一：強制使用核心句型**
+        你「必須」圍繞以下這個句型來出題。題目的答案必須用到這個句型。
+        ---
+        【核心句型資料】
+        - 句型: `{pattern_data.get('pattern', '無')}`
+        - 說明: `{pattern_data.get('explanation', '無')}`
+        - 範例: `{pattern_data.get('example_zh', '無')} -> {pattern_data.get('example_en', '無')}`
+        ---
+
+        **指令二：模仿風格**
+        題目的難度、長度和語氣，請盡量模仿下方的「風格參考範例」。
+        ---
+        【風格參考範例】
+        {example_sentences_str}
+        ---
+
+        **指令三：嚴格輸出格式**
+        你的回覆「必須」是一個 JSON 物件，且「只能」包含這兩個 key：
+        1. `new_sentence`: (string) 你設計的中文翻譯題目。
+        2. `hint_text`: (string) 提示文字，內容必須是核心句型的「句型」本身，例如 `S + V + as...as...`。
+
+        範例輸出:
+        {{
+            "new_sentence": "如果我有足夠的錢，我就會買下那棟房子。",
+            "hint_text": "If + S + had + ..., S + would + V..."
+        }}
+        """
+        user_prompt = "請嚴格遵照你的三項核心指令，為我生成一題考題的 JSON 物件。"
+
+        # 4. 呼叫 LLM API
+        try:
+            # 注意：這裡的 API 呼叫回傳的是單一物件，而不是列表
+            response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+            
+            # 驗證回傳的資料是否符合預期
+            if isinstance(response_data, dict) and 'new_sentence' in response_data and 'hint_text' in response_data:
+                # 確保 hint_text 是我們指定的句型
+                response_data['hint_text'] = pattern_data.get('pattern', response_data['hint_text'])
+                generated_questions.append(response_data)
+                print(f"  - 成功生成題目: \"{response_data['new_sentence']}\"")
+            else:
+                print(f"  - 警告：AI 回傳格式不符，已跳過此題。收到的資料: {response_data}")
+
+        except Exception as e:
+            print(f"為句型 '{pattern_data.get('pattern')}' 生成題目時發生錯誤: {e}")
+            # 單一題目生成失敗，不影響其他題目，繼續循環
+            continue
+
+    return generated_questions
+
 
 def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, hint_text=None, model_name=None):
-    """批改使用者答案並提供回饋。"""
-    # ... (prompt 內容不變，此處省略) ...
+    """批改使用者答案並提供回饋 (此函式不變)。"""
     error_analysis_instructions = """
     4.  `error_analysis`: (array of objects) 一個清單，如果沒有任何錯誤，請回傳一個空清單 `[]`。
         清單中的每一個物件都必須包含以下所有欄位：
@@ -213,7 +225,6 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
     """
     
     if review_context:
-        # 這是複習題的「目標導向」prompt
         system_prompt = f"""
         你是一位英文教學專家，正在驗收學生對核心觀念的掌握。
         **首要任務**: 判斷學生作答是否掌握了「核心複習觀念: {review_context}」，並在回傳的 JSON 中設定 `did_master_review_concept` (boolean) 的值。
@@ -224,7 +235,6 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
         **原始中文句子是**: "{chinese_sentence}"
         """
     else:
-        # 這是新題目的常規 prompt
         system_prompt = f"""
         你是一位細心的英文家教，請分析學生的翻譯答案。
         **核心考點提示**: 「{hint_text if hint_text else '無特定提示'}」。請特別留意此點的掌握情況。
