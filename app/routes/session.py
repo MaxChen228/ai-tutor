@@ -110,7 +110,7 @@ def submit_answer_endpoint():
         if point_id is not None and mastery is not None:
             db.update_knowledge_point_mastery(point_id, mastery)
     
-    # 核心修改：移除 db.add_mistake(...) 這一行，不再自動儲存錯誤。
+    # 【核心修改】：移除 db.add_mistake(...) 這一行，不再自動儲存錯誤。
     # 完整的 feedback_data 將直接回傳給前端，由使用者決定如何處理。
     
     return jsonify(feedback_data)

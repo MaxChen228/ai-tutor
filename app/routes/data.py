@@ -2,6 +2,7 @@
 
 from flask import Blueprint, request, jsonify
 from app.services import database as db
+from app.services import ai_service as ai
 import datetime
 import json
 
@@ -176,43 +177,71 @@ def batch_action_knowledge_points_endpoint():
         "updated_count": updated_count
     })
 
+# --- 【新增】合併錯誤的 API 端點 ---
+@data_bp.route("/merge_errors", methods=['POST'])
+def merge_errors_endpoint():
+    """
+    使用 AI 將兩個錯誤分析合併成一個。
+    預期請求 Body: { "error1": {...}, "error2": {...} }
+    """
+    data = request.get_json()
+    if not data or "error1" not in data or "error2" not in data:
+        return jsonify({"error": "請求格式錯誤，需要 'error1' 和 'error2' 欄位。"}), 400
+    
+    error1 = data["error1"]
+    error2 = data["error2"]
+    
+    print(f"[API] 收到請求：合併兩個錯誤分析")
+    print(f"  - 錯誤1: {error1.get('key_point_summary', 'N/A')}")
+    print(f"  - 錯誤2: {error2.get('key_point_summary', 'N/A')}")
+    
+    try:
+        # 呼叫 AI 服務來合併錯誤
+        merged_error = ai.merge_error_analyses(error1, error2)
+        return jsonify({"merged_error": merged_error})
+    except Exception as e:
+        print(f"[API] 合併錯誤時發生問題: {e}")
+        return jsonify({"error": str(e)}), 500
 
-# --- 新增的 API 端點 ---
+# --- 【新增】儲存最終知識點的 API 端點 ---
 @data_bp.route("/knowledge_points/finalize", methods=['POST'])
 def finalize_knowledge_points_endpoint():
     """
     接收前端整理好（排序、刪除、合併後）的錯誤分析陣列，
     並將它們作為正式的知識點存入資料庫。
     """
-    # 這裡的 user_id 應該從您的認證機制中獲取，例如 g.user_id
-    # 為了範例的完整性，我們暫時 hardcode
-    # user_id = g.user_id 
+    data = request.get_json()
     
-    final_errors = request.get_json()
-
+    if not isinstance(data, dict):
+        return jsonify({"error": "無效的資料格式。"}), 400
+    
+    final_errors = data.get('errors', [])
+    question_data = data.get('question_data', {})
+    user_answer = data.get('user_answer', '')
+    
     if not isinstance(final_errors, list):
-        return jsonify({"error": "無效的資料格式，應為一個錯誤列表。"}), 400
+        return jsonify({"error": "錯誤列表格式不正確。"}), 400
 
     try:
-        question_data = final_errors[0].get('question_context', {}) # 假設前端會把原始問題上下文一起傳來
-        user_answer = final_errors[0].get('user_answer_context', '')
+        print(f"[API] 收到請求：儲存 {len(final_errors)} 個最終確認的知識點")
         
         # 遍歷前端傳來的列表
         for error_data in final_errors:
             # 為了復用 db.add_mistake，我們需要構造一個類似原始 feedback 的結構
-            # 這裡的實作取決於您 db.add_mistake 的具體參數
-            # 假設它需要一個完整的 feedback dict
             mock_feedback_data = {
                 "is_generally_correct": False,
-                "error_analysis": [error_data] # 將單個錯誤放入分析列表
+                "error_analysis": [error_data]  # 將單個錯誤放入分析列表
             }
+            
             # 呼叫資料庫服務，將每個錯誤（現在是確認過的知識點）加入資料庫
             db.add_mistake(question_data, user_answer, mock_feedback_data)
+            
+            print(f"  - 已儲存知識點: {error_data.get('key_point_summary', 'N/A')}")
         
         return jsonify({
             "status": "success",
             "message": f"已成功儲存 {len(final_errors)} 個知識點。"
-        }), 201 # 201 Created
+        }), 201  # 201 Created
 
     except Exception as e:
         print(f"Error in finalize_knowledge_points_endpoint: {e}")

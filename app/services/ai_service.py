@@ -226,3 +226,84 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
                 "severity": "major"
             }]
         }
+    
+
+def merge_error_analyses(error1, error2):
+    """
+    使用 AI 將兩個錯誤分析智慧地合併成一個。
+    
+    Args:
+        error1 (dict): 第一個錯誤分析物件
+        error2 (dict): 第二個錯誤分析物件
+    
+    Returns:
+        dict: 合併後的錯誤分析物件
+    """
+    
+    # 準備系統提示詞
+    system_prompt = """
+    你是一位專業的英文教學 AI 助理。
+    你的任務是將兩個相關的英文錯誤分析「智慧地合併」成一個更精煉、更有教學價值的知識點。
+    
+    合併原則：
+    1. 找出兩個錯誤的共同核心觀念
+    2. 整合它們的解釋，去除重複部分
+    3. 保留最具代表性的錯誤片語作為範例
+    4. 生成一個涵蓋兩者的新標題（key_point_summary）
+    
+    輸出格式（JSON）：
+    {
+        "error_type_code": "A/B/C/D",  // 選擇最適合的分類
+        "key_point_summary": "合併後的核心觀念標題（繁體中文）",
+        "original_phrase": "代表性的錯誤片語",
+        "correction": "正確的片語",
+        "explanation": "整合後的解釋（繁體中文）",
+        "severity": "major/minor"
+    }
+    """
+    
+    # 準備使用者提示詞
+    user_prompt = f"""
+    請將以下兩個英文錯誤分析合併成一個：
+    
+    錯誤分析 1：
+    - 分類：{error1.get('error_type_code', 'N/A')}
+    - 標題：{error1.get('key_point_summary', 'N/A')}
+    - 錯誤片語："{error1.get('original_phrase', 'N/A')}"
+    - 正確片語："{error1.get('correction', 'N/A')}"
+    - 解釋：{error1.get('explanation', 'N/A')}
+    - 嚴重程度：{error1.get('severity', 'N/A')}
+    
+    錯誤分析 2：
+    - 分類：{error2.get('error_type_code', 'N/A')}
+    - 標題：{error2.get('key_point_summary', 'N/A')}
+    - 錯誤片語："{error2.get('original_phrase', 'N/A')}"
+    - 正確片語："{error2.get('correction', 'N/A')}"
+    - 解釋：{error2.get('explanation', 'N/A')}
+    - 嚴重程度：{error2.get('severity', 'N/A')}
+    
+    請分析這兩個錯誤的關聯性，並智慧地合併成一個更有價值的知識點。
+    """
+    
+    try:
+        # 使用預設的生成模型來處理合併
+        merged_data = _call_llm_api(system_prompt, user_prompt, None, DEFAULT_GENERATION_MODEL)
+        
+        if MONITOR_MODE:
+            print("\n" + "="*20 + " AI 合併結果 " + "="*20)
+            print(json.dumps(merged_data, ensure_ascii=False, indent=2))
+            print("="*50 + "\n")
+        
+        return merged_data
+        
+    except Exception as e:
+        print(f"AI 合併錯誤分析時發生錯誤: {e}")
+        # 如果 AI 失敗，返回一個基本的合併結果
+        return {
+            "error_type_code": error1.get('error_type_code', 'A'),
+            "key_point_summary": f"{error1.get('key_point_summary', '')} / {error2.get('key_point_summary', '')}",
+            "original_phrase": error1.get('original_phrase', ''),
+            "correction": error1.get('correction', ''),
+            "explanation": f"{error1.get('explanation', '')} 另外，{error2.get('explanation', '')}",
+            "severity": "major" if error1.get('severity') == 'major' or error2.get('severity') == 'major' else "minor"
+        }
