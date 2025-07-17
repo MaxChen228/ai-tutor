@@ -12,9 +12,7 @@ data_bp = Blueprint('data_bp', __name__)
 
 @data_bp.route("/get_dashboard", methods=['GET'])
 def get_dashboard_endpoint():
-    """
-    獲取知識點儀表板數據 (未封存的)。
-    """
+    """獲取知識點儀表板數據 (未封存的)。"""
     print("\n[API] 收到請求：獲取知識點儀表板數據...")
     try:
         points_dict = db.get_all_knowledge_points()
@@ -25,9 +23,7 @@ def get_dashboard_endpoint():
 
 @data_bp.route("/get_flashcards", methods=['GET'])
 def get_flashcards_endpoint():
-    """
-    根據錯誤類型獲取單字卡數據。
-    """
+    """根據錯誤類型獲取單字卡數據。"""
     print("\n[API] 收到請求：獲取單字卡數據...")
     types_str = request.args.get('types', '')
     if not types_str:
@@ -46,9 +42,7 @@ def get_flashcards_endpoint():
 
 @data_bp.route("/get_calendar_heatmap", methods=['GET'])
 def get_calendar_heatmap_endpoint():
-    """
-    提供特定月份的每日學習題數。
-    """
+    """提供特定月份的每日學習題數。"""
     print("\n[API] 收到請求：獲取學習日曆熱力圖數據...")
     try:
         current_time = datetime.datetime.now(datetime.timezone.utc)
@@ -70,9 +64,7 @@ def get_calendar_heatmap_endpoint():
 
 @data_bp.route("/get_daily_details", methods=['GET'])
 def get_daily_details_endpoint():
-    """
-    提供特定日期的學習詳情。
-    """
+    """提供特定日期的學習詳情。"""
     print("\n[API] 收到請求：獲取單日學習詳情...")
     date_str = request.args.get('date')
     if not date_str:
@@ -87,7 +79,22 @@ def get_daily_details_endpoint():
         print(f"[API] 查詢單日詳情時發生錯誤: {e}")
         return jsonify({"error": str(e)}), 500
 
-# --- 【v5.17 新增】管理知識點的 API ---
+# --- 管理知識點的 API ---
+
+@data_bp.route("/knowledge_point/<int:point_id>", methods=['GET'])
+def get_knowledge_point_endpoint(point_id):
+    """獲取單一知識點的詳細資訊。"""
+    print(f"[API] 收到請求：獲取知識點 ID {point_id} 的詳細資訊")
+    
+    try:
+        point_data = db.get_knowledge_point_by_id(point_id)
+        if point_data:
+            return jsonify(point_data)
+        else:
+            return jsonify({"error": f"找不到知識點 ID {point_id}"}), 404
+    except Exception as e:
+        print(f"[API] 獲取知識點詳情時發生錯誤: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @data_bp.route("/knowledge_point/<int:point_id>", methods=['PUT'])
 def update_knowledge_point_endpoint(point_id):
@@ -103,6 +110,42 @@ def update_knowledge_point_endpoint(point_id):
         return jsonify({"message": message})
     else:
         return jsonify({"error": message}), 400
+
+@data_bp.route("/knowledge_point/<int:point_id>/ai_review", methods=['POST'])
+def ai_review_knowledge_point_endpoint(point_id):
+    """
+    使用 AI 重新審閱知識點並提供改進建議。
+    """
+    print(f"[API] 收到請求：AI 重新審閱知識點 ID {point_id}")
+    
+    try:
+        # 先獲取知識點資料
+        point_data = db.get_knowledge_point_by_id(point_id)
+        if not point_data:
+            return jsonify({"error": f"找不到知識點 ID {point_id}"}), 404
+        
+        # 從請求中獲取使用的模型（可選）
+        request_data = request.get_json() or {}
+        model_name = request_data.get('model_name')
+        
+        # 呼叫 AI 服務進行審閱
+        review_result = ai.ai_review_knowledge_point(point_data, model_name)
+        
+        # 將審閱結果格式化為字串並儲存到資料庫
+        review_notes = json.dumps(review_result, ensure_ascii=False, indent=2)
+        success = db.update_knowledge_point_ai_review(point_id, review_notes)
+        
+        if success:
+            return jsonify({
+                "message": "AI 審閱完成並已儲存",
+                "review_result": review_result
+            })
+        else:
+            return jsonify({"error": "審閱結果儲存失敗"}), 500
+            
+    except Exception as e:
+        print(f"[API] AI 審閱知識點時發生錯誤: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @data_bp.route("/knowledge_point/<int:point_id>/archive", methods=['POST'])
 def archive_knowledge_point_endpoint(point_id):
@@ -144,14 +187,10 @@ def get_archived_knowledge_points_endpoint():
     except Exception as e:
         print(f"[API] 獲取已封存知識點時發生錯誤: {e}")
         return jsonify({"error": str(e)}), 500
-    
 
 @data_bp.route("/knowledge_points/batch_action", methods=['POST'])
 def batch_action_knowledge_points_endpoint():
-    """
-    批次處理多個知識點。
-    預期請求 Body: { "action": "archive" | "unarchive", "ids": [1, 2, 3] }
-    """
+    """批次處理多個知識點。"""
     data = request.get_json()
     if not data or "action" not in data or "ids" not in data:
         return jsonify({"error": "請求格式錯誤，需要 'action' 和 'ids' 欄位。"}), 400
@@ -177,13 +216,10 @@ def batch_action_knowledge_points_endpoint():
         "updated_count": updated_count
     })
 
-# --- 【新增】合併錯誤的 API 端點 ---
+# --- 合併錯誤的 API 端點 ---
 @data_bp.route("/merge_errors", methods=['POST'])
 def merge_errors_endpoint():
-    """
-    使用 AI 將兩個錯誤分析合併成一個。
-    預期請求 Body: { "error1": {...}, "error2": {...} }
-    """
+    """使用 AI 將兩個錯誤分析合併成一個。"""
     data = request.get_json()
     if not data or "error1" not in data or "error2" not in data:
         return jsonify({"error": "請求格式錯誤，需要 'error1' 和 'error2' 欄位。"}), 400
@@ -196,20 +232,16 @@ def merge_errors_endpoint():
     print(f"  - 錯誤2: {error2.get('key_point_summary', 'N/A')}")
     
     try:
-        # 呼叫 AI 服務來合併錯誤
         merged_error = ai.merge_error_analyses(error1, error2)
         return jsonify({"merged_error": merged_error})
     except Exception as e:
         print(f"[API] 合併錯誤時發生問題: {e}")
         return jsonify({"error": str(e)}), 500
 
-# --- 【新增】儲存最終知識點的 API 端點 ---
+# --- 儲存最終知識點的 API 端點 ---
 @data_bp.route("/knowledge_points/finalize", methods=['POST'])
 def finalize_knowledge_points_endpoint():
-    """
-    接收前端整理好（排序、刪除、合併後）的錯誤分析陣列，
-    並將它們作為正式的知識點存入資料庫。
-    """
+    """接收前端整理好的錯誤分析陣列，並將它們作為正式的知識點存入資料庫。"""
     data = request.get_json()
     
     if not isinstance(data, dict):
@@ -225,23 +257,19 @@ def finalize_knowledge_points_endpoint():
     try:
         print(f"[API] 收到請求：儲存 {len(final_errors)} 個最終確認的知識點")
         
-        # 遍歷前端傳來的列表
         for error_data in final_errors:
-            # 為了復用 db.add_mistake，我們需要構造一個類似原始 feedback 的結構
             mock_feedback_data = {
                 "is_generally_correct": False,
-                "error_analysis": [error_data]  # 將單個錯誤放入分析列表
+                "error_analysis": [error_data]
             }
             
-            # 呼叫資料庫服務，將每個錯誤（現在是確認過的知識點）加入資料庫
             db.add_mistake(question_data, user_answer, mock_feedback_data)
-            
             print(f"  - 已儲存知識點: {error_data.get('key_point_summary', 'N/A')}")
         
         return jsonify({
             "status": "success",
             "message": f"已成功儲存 {len(final_errors)} 個知識點。"
-        }), 201  # 201 Created
+        }), 201
 
     except Exception as e:
         print(f"Error in finalize_knowledge_points_endpoint: {e}")

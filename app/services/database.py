@@ -58,14 +58,32 @@ def init_db():
             correct_count INTEGER DEFAULT 0,
             last_reviewed_on TIMESTAMPTZ,
             next_review_date DATE,
-            is_archived BOOLEAN DEFAULT FALSE
+            is_archived BOOLEAN DEFAULT FALSE,
+            ai_review_notes TEXT,
+            last_ai_review_date TIMESTAMPTZ
         );
         """)
         
-        # 【新增】檢查 is_archived 欄位是否存在，如果不存在就加上
+        # 檢查並添加新的AI審閱相關欄位
         cursor.execute("""
         DO $$
         BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='knowledge_points' AND column_name='ai_review_notes'
+            ) THEN
+                ALTER TABLE knowledge_points ADD COLUMN ai_review_notes TEXT;
+                RAISE NOTICE '欄位 ai_review_notes 已成功加入 knowledge_points 表格。';
+            END IF;
+            
+            IF NOT EXISTS (
+                SELECT 1 FROM information_schema.columns 
+                WHERE table_name='knowledge_points' AND column_name='last_ai_review_date'
+            ) THEN
+                ALTER TABLE knowledge_points ADD COLUMN last_ai_review_date TIMESTAMPTZ;
+                RAISE NOTICE '欄位 last_ai_review_date 已成功加入 knowledge_points 表格。';
+            END IF;
+            
             IF NOT EXISTS (
                 SELECT 1 FROM information_schema.columns 
                 WHERE table_name='knowledge_points' AND column_name='is_archived'
@@ -90,8 +108,6 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
         q_type = question_data.get('type', 'new')
         source_id = question_data.get('original_mistake_id')
         
-        # --- 【修改開始】 ---
-        
         # 建立一個從 code 到中文名稱的對照表
         ERROR_CODE_MAP = {
             "A": "詞彙與片語錯誤",
@@ -106,18 +122,12 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
         error_analysis = feedback_data.get('error_analysis', [])
         
         if error_analysis:
-            # 優先選取主要錯誤，如果沒有，就選取第一個錯誤
             major_errors = [e for e in error_analysis if e.get('severity') == 'major']
             first_error = major_errors[0] if major_errors else error_analysis[0]
             
-            # 從錯誤中讀取新的 error_type_code
             primary_error_code = first_error.get('error_type_code')
-            # 使用對照表來取得主要錯誤的分類名稱
             primary_error_category = ERROR_CODE_MAP.get(primary_error_code, '分類錯誤')
-            # 使用 key_point_summary 作為子分類，因為它最能代表錯誤核心
             primary_error_subcategory = first_error.get('key_point_summary', '子分類錯誤')
-
-        # --- 【修改結束】 ---
 
         cursor.execute(
             """
@@ -139,16 +149,10 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
                     print(f"  - (忽略已處理的複習點: {exclude_phrase})")
                     continue
                 
-                # --- 【修改開始】 ---
-                
                 error_code = error.get('error_type_code')
-                # 使用對照表取得分類名稱
                 category = ERROR_CODE_MAP.get(error_code, '分類錯誤')
-                # 使用 key_point_summary 作為子分類
                 subcategory = error.get('key_point_summary', '核心觀念')
                 
-                # --- 【修改結束】 ---
-
                 explanation = error.get('explanation')
                 incorrect_phrase = error.get('original_phrase')
                 summary = error.get('key_point_summary', '核心觀念')
@@ -297,15 +301,18 @@ def get_daily_details(activity_date):
     formatted_new = [{"summary": s, "count": c} for s, c in new_points.items()]
     return {"total_learning_time_seconds": int(total_seconds), "reviewed_knowledge_points": formatted_reviewed, "new_knowledge_points": formatted_new}
 
-# --- 【v5.17 新增】管理知識點專用的函式 ---
+# --- 知識點管理專用的函式 ---
 
 def update_knowledge_point_details(point_id, details):
     """更新單一知識點的詳細資訊。"""
     conn = get_db_connection()
     with conn.cursor() as cursor:
-        # 這裡可以根據前端傳來的 `details` dictionary 動態建立 UPDATE 語句
-        # 為了安全起見，我們先只允許更新特定欄位
-        allowed_fields = ['correct_phrase', 'explanation', 'key_point_summary', 'category', 'subcategory']
+        # 允許更新的欄位列表
+        allowed_fields = [
+            'correct_phrase', 'explanation', 'key_point_summary', 
+            'category', 'subcategory', 'user_context_sentence', 
+            'incorrect_phrase_in_context', 'ai_review_notes'
+        ]
         update_fields = []
         update_values = []
         
@@ -325,6 +332,23 @@ def update_knowledge_point_details(point_id, details):
         conn.commit()
     conn.close()
     return updated_rows > 0, f"成功更新 {updated_rows} 個知識點。"
+
+def update_knowledge_point_ai_review(point_id, ai_review_notes):
+    """更新知識點的AI審閱結果。"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE knowledge_points 
+            SET ai_review_notes = %s, last_ai_review_date = %s
+            WHERE id = %s
+            """,
+            (ai_review_notes, datetime.datetime.now(datetime.timezone.utc), point_id)
+        )
+        updated_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return updated_rows > 0
 
 def set_knowledge_point_archived_status(point_id, is_archived):
     """設定知識點的封存狀態。"""
@@ -346,8 +370,18 @@ def delete_knowledge_point(point_id):
     conn.close()
     return deleted_rows > 0
 
-
-# --- 【v5.17 修改】路由檔案需要用到的輔助查詢函式 ---
+def batch_update_knowledge_points_archived_status(point_ids, is_archived):
+    """批次更新知識點的封存狀態。"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "UPDATE knowledge_points SET is_archived = %s WHERE id = ANY(%s)",
+            (is_archived, point_ids)
+        )
+        updated_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return updated_rows
 
 def get_knowledge_point_phrase(point_id):
     """根據 ID 獲取單一知識點的 correct_phrase。"""
@@ -358,6 +392,34 @@ def get_knowledge_point_phrase(point_id):
     conn.close()
     return result[0] if result else None
 
+def get_knowledge_point_by_id(point_id):
+    """根據 ID 獲取完整的知識點資料。"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        cursor.execute(
+            """
+            SELECT id, category, subcategory, correct_phrase, explanation, 
+                   user_context_sentence, incorrect_phrase_in_context, 
+                   key_point_summary, mastery_level, mistake_count, 
+                   correct_count, next_review_date, ai_review_notes, 
+                   last_ai_review_date, is_archived
+            FROM knowledge_points 
+            WHERE id = %s
+            """,
+            (point_id,)
+        )
+        point = cursor.fetchone()
+    conn.close()
+    
+    if point:
+        point_dict = dict(point)
+        if point_dict.get('next_review_date'):
+            point_dict['next_review_date'] = point_dict['next_review_date'].isoformat()
+        if point_dict.get('last_ai_review_date'):
+            point_dict['last_ai_review_date'] = point_dict['last_ai_review_date'].isoformat()
+        return point_dict
+    return None
+
 def get_all_knowledge_points():
     """獲取所有未封存的知識點，用於儀表板。"""
     conn = get_db_connection()
@@ -366,7 +428,8 @@ def get_all_knowledge_points():
             SELECT id, category, subcategory, correct_phrase, explanation, 
                    user_context_sentence, incorrect_phrase_in_context, 
                    key_point_summary, mastery_level, mistake_count, 
-                   correct_count, next_review_date 
+                   correct_count, next_review_date, ai_review_notes, 
+                   last_ai_review_date
             FROM knowledge_points 
             WHERE is_archived = FALSE
             ORDER BY mastery_level ASC, mistake_count DESC
@@ -378,6 +441,8 @@ def get_all_knowledge_points():
         row_dict = dict(row)
         if row_dict.get('next_review_date'):
             row_dict['next_review_date'] = row_dict['next_review_date'].isoformat()
+        if row_dict.get('last_ai_review_date'):
+            row_dict['last_ai_review_date'] = row_dict['last_ai_review_date'].isoformat()
         points_dict.append(row_dict)
     return points_dict
 
@@ -389,7 +454,8 @@ def get_archived_knowledge_points():
             SELECT id, category, subcategory, correct_phrase, explanation, 
                    user_context_sentence, incorrect_phrase_in_context, 
                    key_point_summary, mastery_level, mistake_count, 
-                   correct_count, next_review_date 
+                   correct_count, next_review_date, ai_review_notes, 
+                   last_ai_review_date
             FROM knowledge_points 
             WHERE is_archived = TRUE
             ORDER BY last_reviewed_on DESC
@@ -401,6 +467,8 @@ def get_archived_knowledge_points():
         row_dict = dict(row)
         if row_dict.get('next_review_date'):
             row_dict['next_review_date'] = row_dict['next_review_date'].isoformat()
+        if row_dict.get('last_ai_review_date'):
+            row_dict['last_ai_review_date'] = row_dict['last_ai_review_date'].isoformat()
         points_dict.append(row_dict)
     return points_dict
 
@@ -430,4 +498,3 @@ def get_flashcards_by_types(types_to_fetch):
                     "category": error_type
                 })
     return flashcards
-

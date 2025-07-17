@@ -39,7 +39,6 @@ except Exception as e:
 
 # --- 文法庫讀取 ---
 try:
-    # 修正路徑以符合從 run.py 執行的相對位置
     with open("app/grammar_patterns.json", "r", encoding="utf-8") as f:
         grammar_patterns = json.load(f)
     print(f"成功載入 {len(grammar_patterns)} 筆文法句型。")
@@ -101,7 +100,6 @@ def _normalize_questions_output(response_data):
 # --- 公共函式 ---
 
 def generate_new_question_batch(num_new, difficulty, length, model_name=None):
-    # 此處省略 generate_new_question_batch 的程式碼，因計畫一未修改此函式
     if not grammar_patterns:
         print("錯誤：文法庫為空或載入失敗，無法生成新題目。")
         return []
@@ -150,16 +148,36 @@ def generate_new_question_batch(num_new, difficulty, length, model_name=None):
             continue
     return generated_questions
 
-
-# --- 【計畫一修改】重寫批改回饋函式 ---
-def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, hint_text=None, model_name=None):
-    """
-    【vNext 標準化版】批改使用者答案並提供回饋。
-    - 強制中文回饋
-    - 使用錯誤代碼 error_type_code
+def generate_question_batch(weak_points_str, num_questions, model_name=None):
+    """為複習題生成問題"""
+    system_prompt = f"""
+    你是一位專業的英文教學 AI，專門為學生的弱點設計「複習題」。
+    
+    以下是學生需要複習的弱點知識：
+    {weak_points_str}
+    
+    請為每個弱點設計一個中文翻譯題目，用來測試學生是否已掌握該知識點。
+    
+    輸出格式要求：
+    回傳一個 JSON 陣列，每個元素包含：
+    - new_sentence: 中文翻譯題目
+    - hint_text: 考點提示（簡潔描述該知識點）
+    
+    請確保題目設計合理，能有效檢驗學生對該知識點的掌握程度。
     """
     
-    # 這是兩個 prompt 都會用到的共用說明，也是本次修改的重點
+    user_prompt = f"請為這 {num_questions} 個弱點知識設計對應的複習題目。"
+    
+    try:
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        return _normalize_questions_output(response_data)
+    except Exception as e:
+        print(f"生成複習題時發生錯誤: {e}")
+        return []
+
+def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, hint_text=None, model_name=None):
+    """批改使用者答案並提供回饋。"""
+    
     error_analysis_instructions = """
     4.  `error_analysis`: (array of objects) 錯誤分析清單。如果沒有任何錯誤，請回傳一個空清單 `[]`。
         清單中的每一個物件都「必須」包含以下「所有」欄位：
@@ -175,11 +193,9 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
         * `severity`: (string) 錯誤嚴重程度，`major` 或 `minor`。
     """
     
-    # 整體建議，也要求用繁體中文
     overall_suggestion_instruction = "3.  `overall_suggestion`: (string) 在綜合考量所有錯誤後，提供一個「整體最佳」的翻譯建議。這個建議「必須」是完整的句子，且「必須」使用**繁體中文**。"
 
     if review_context:
-        # 這是複習題的「目標導向」prompt
         system_prompt = f"""
         你是一位嚴謹的英文教學評分 AI。
         **首要任務**: 判斷學生作答是否掌握了「核心複習觀念: {review_context}」，並在回傳的 JSON 中設定 `did_master_review_concept` (boolean) 的值。
@@ -194,7 +210,6 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
         **原始中文句子是**: "{chinese_sentence}"
         """
     else:
-        # 這是新題目的常規 prompt
         system_prompt = f"""
         你是一位細心且嚴謹的英文家教 AI。
         **核心考點提示**: 「{hint_text if hint_text else '無特定提示'}」。請特別留意此點的掌握情況。
@@ -212,13 +227,12 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
         return _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GRADING_MODEL)
     except Exception as e:
         print(f"AI 批改時發生錯誤 - Model: {model_name}, Error: {e}")
-        # 確保錯誤回傳的格式也符合前端預期
         return {
             "did_master_review_concept": False, 
             "is_generally_correct": False, 
             "overall_suggestion": f"AI 模型 ({model_name}) 暫時無法提供服務，請稍後再試。",
             "error_analysis": [{
-                "error_type_code": "E", # 'E' for Error
+                "error_type_code": "E",
                 "key_point_summary": "系統錯誤",
                 "original_phrase": "N/A",
                 "correction": "N/A",
@@ -226,21 +240,10 @@ def get_tutor_feedback(chinese_sentence, user_translation, review_context=None, 
                 "severity": "major"
             }]
         }
-    
 
 def merge_error_analyses(error1, error2):
-    """
-    使用 AI 將兩個錯誤分析智慧地合併成一個。
+    """使用 AI 將兩個錯誤分析智慧地合併成一個。"""
     
-    Args:
-        error1 (dict): 第一個錯誤分析物件
-        error2 (dict): 第二個錯誤分析物件
-    
-    Returns:
-        dict: 合併後的錯誤分析物件
-    """
-    
-    # 準備系統提示詞
     system_prompt = """
     你是一位專業的英文教學 AI 助理。
     你的任務是將兩個相關的英文錯誤分析「智慧地合併」成一個更精煉、更有教學價值的知識點。
@@ -253,7 +256,7 @@ def merge_error_analyses(error1, error2):
     
     輸出格式（JSON）：
     {
-        "error_type_code": "A/B/C/D",  // 選擇最適合的分類
+        "error_type_code": "A/B/C/D",
         "key_point_summary": "合併後的核心觀念標題（繁體中文）",
         "original_phrase": "代表性的錯誤片語",
         "correction": "正確的片語",
@@ -262,7 +265,6 @@ def merge_error_analyses(error1, error2):
     }
     """
     
-    # 準備使用者提示詞
     user_prompt = f"""
     請將以下兩個英文錯誤分析合併成一個：
     
@@ -286,7 +288,6 @@ def merge_error_analyses(error1, error2):
     """
     
     try:
-        # 使用預設的生成模型來處理合併
         merged_data = _call_llm_api(system_prompt, user_prompt, None, DEFAULT_GENERATION_MODEL)
         
         if MONITOR_MODE:
@@ -298,7 +299,6 @@ def merge_error_analyses(error1, error2):
         
     except Exception as e:
         print(f"AI 合併錯誤分析時發生錯誤: {e}")
-        # 如果 AI 失敗，返回一個基本的合併結果
         return {
             "error_type_code": error1.get('error_type_code', 'A'),
             "key_point_summary": f"{error1.get('key_point_summary', '')} / {error2.get('key_point_summary', '')}",
@@ -306,4 +306,92 @@ def merge_error_analyses(error1, error2):
             "correction": error1.get('correction', ''),
             "explanation": f"{error1.get('explanation', '')} 另外，{error2.get('explanation', '')}",
             "severity": "major" if error1.get('severity') == 'major' or error2.get('severity') == 'major' else "minor"
+        }
+
+def ai_review_knowledge_point(knowledge_point_data, model_name=None):
+    """
+    AI 重新審閱知識點，提供改進建議。
+    
+    Args:
+        knowledge_point_data (dict): 知識點的完整資料
+        model_name (str): 使用的模型名稱
+    
+    Returns:
+        dict: AI 審閱結果
+    """
+    
+    system_prompt = """
+    你是一位專業的英語教學專家和知識管理顧問。
+    你的任務是仔細審閱一個英文學習知識點，並提供建設性的改進建議。
+    
+    審閱重點：
+    1. 知識點的準確性和完整性
+    2. 解釋的清晰度和教學效果
+    3. 錯誤分類是否合適
+    4. 是否有遺漏的重要資訊
+    5. 學習者可能的困惑點
+    
+    請提供具體、實用的改進建議，並評估這個知識點的整體品質。
+    
+    輸出格式（JSON）：
+    {
+        "overall_assessment": "整體評估（繁體中文）",
+        "accuracy_score": 1-10,
+        "clarity_score": 1-10,
+        "teaching_effectiveness": 1-10,
+        "improvement_suggestions": [
+            "建議1（繁體中文）",
+            "建議2（繁體中文）"
+        ],
+        "potential_confusions": [
+            "可能的困惑點1（繁體中文）",
+            "可能的困惑點2（繁體中文）"
+        ],
+        "recommended_category": "建議的錯誤分類（如果需要更改）",
+        "additional_examples": [
+            "額外的例句1",
+            "額外的例句2"
+        ]
+    }
+    """
+    
+    user_prompt = f"""
+    請審閱以下英文學習知識點：
+    
+    【知識點資料】
+    - 分類：{knowledge_point_data.get('category', 'N/A')}
+    - 子分類：{knowledge_point_data.get('subcategory', 'N/A')}
+    - 核心觀念：{knowledge_point_data.get('key_point_summary', 'N/A')}
+    - 正確用法：{knowledge_point_data.get('correct_phrase', 'N/A')}
+    - 錯誤用法：{knowledge_point_data.get('incorrect_phrase_in_context', 'N/A')}
+    - 解釋：{knowledge_point_data.get('explanation', 'N/A')}
+    - 學習者原句：{knowledge_point_data.get('user_context_sentence', 'N/A')}
+    - 熟練度：{knowledge_point_data.get('mastery_level', 0)}/5.0
+    - 錯誤次數：{knowledge_point_data.get('mistake_count', 0)}
+    - 答對次數：{knowledge_point_data.get('correct_count', 0)}
+    
+    請提供詳細的審閱報告和改進建議。
+    """
+    
+    try:
+        review_result = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        
+        if MONITOR_MODE:
+            print("\n" + "="*20 + " AI 審閱結果 " + "="*20)
+            print(json.dumps(review_result, ensure_ascii=False, indent=2))
+            print("="*50 + "\n")
+        
+        return review_result
+        
+    except Exception as e:
+        print(f"AI 審閱知識點時發生錯誤: {e}")
+        return {
+            "overall_assessment": f"AI 審閱過程中發生錯誤：{str(e)}",
+            "accuracy_score": 5,
+            "clarity_score": 5,
+            "teaching_effectiveness": 5,
+            "improvement_suggestions": ["請稍後再試或聯絡系統管理員"],
+            "potential_confusions": ["系統暫時無法提供分析"],
+            "recommended_category": knowledge_point_data.get('category', 'N/A'),
+            "additional_examples": []
         }
