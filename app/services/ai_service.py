@@ -644,3 +644,466 @@ def generate_smart_hint(chinese_sentence, user_current_input="", original_hint="
             ],
             "encouragement": "慢慢來，每一次思考都是進步！"
         }
+    
+def generate_vocabulary_definition(word, context=None, model_name=None):
+    """使用LLM為單字生成完整的學習資訊"""
+    
+    system_prompt = f"""
+    你是專業的英語詞典編輯和語言學習專家，請為單字 "{word}" 提供準確且適合台灣學習者的完整學習資訊。
+
+    回傳格式要求：
+    你的回覆「必須」是一個 JSON 物件，包含以下欄位：
+    
+    {{
+        "word": "{word}",
+        "pronunciation_ipa": "國際音標（IPA格式）",
+        "part_of_speech": "詞性（名詞/動詞/形容詞等）",
+        "definition_zh": "清晰的繁體中文定義，適合台灣學習者理解",
+        "definition_en": "簡潔的英文定義",
+        "difficulty_level": 1-5的整數（1=國中程度，5=高階學術），
+        "word_frequency_rank": 估計的詞頻排名（1-10000），
+        "example_sentences": [
+            {{"en": "實用的英文例句", "zh": "對應的中文翻譯"}},
+            {{"en": "另一個例句", "zh": "中文翻譯"}}
+        ],
+        "word_family": ["相關的詞彙變化"],
+        "common_collocations": ["常用的搭配詞組"],
+        "synonyms": ["同義詞"],
+        "antonyms": ["反義詞"]
+    }}
+    
+    注意事項：
+    1. 音標使用標準IPA格式
+    2. 中文定義要準確且容易理解
+    3. 例句要實用且不要太複雜
+    4. 難度評估要考慮台灣學習者的程度
+    """
+    
+    user_prompt = f"請為單字 '{word}' 生成完整的學習資料。"
+    if context:
+        user_prompt += f"\n\n語境參考：{context}\n請特別考慮這個語境中的用法。"
+    
+    try:
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        
+        if MONITOR_MODE:
+            print("\n" + "="*20 + " 單字定義生成結果 " + "="*20)
+            print(json.dumps(response_data, ensure_ascii=False, indent=2))
+            print("="*60 + "\n")
+        
+        # 驗證必要欄位
+        required_fields = ['word', 'definition_zh', 'part_of_speech']
+        for field in required_fields:
+            if field not in response_data:
+                raise ValueError(f"AI回應缺少必要欄位：{field}")
+        
+        # 設定預設值
+        response_data.setdefault('difficulty_level', 3)
+        response_data.setdefault('word_frequency_rank', 5000)
+        response_data.setdefault('example_sentences', [])
+        response_data.setdefault('word_family', [])
+        response_data.setdefault('common_collocations', [])
+        response_data.setdefault('synonyms', [])
+        response_data.setdefault('antonyms', [])
+        
+        return response_data
+        
+    except Exception as e:
+        print(f"AI生成單字定義時發生錯誤: {e}")
+        # 回傳基本的備用資料
+        return {
+            "word": word,
+            "pronunciation_ipa": "/wɜːrd/",
+            "part_of_speech": "unknown",
+            "definition_zh": f"單字 '{word}' 的定義（AI生成失敗）",
+            "definition_en": f"Definition of '{word}' (AI generation failed)",
+            "difficulty_level": 3,
+            "word_frequency_rank": 5000,
+            "example_sentences": [],
+            "word_family": [],
+            "common_collocations": [],
+            "synonyms": [],
+            "antonyms": []
+        }
+
+def generate_vocabulary_quiz_options(target_word, correct_definition, question_type="multiple_choice", model_name=None):
+    """為單字測驗生成選擇題選項"""
+    
+    system_prompt = f"""
+    你是專業的英語測驗題目設計師，需要為單字 "{target_word}" 的測驗生成高品質的干擾選項。
+    
+    設計原則：
+    1. 干擾選項要有一定的迷惑性，但不能完全不合理
+    2. 選項應該是相似程度的詞彙或概念
+    3. 避免過於明顯的錯誤答案
+    4. 考慮台灣學習者容易混淆的地方
+    
+    回傳格式：
+    {{
+        "question_text": "請選擇 '{target_word}' 的正確中文意思",
+        "correct_answer": "{correct_definition}",
+        "wrong_options": [
+            "干擾選項1",
+            "干擾選項2", 
+            "干擾選項3"
+        ],
+        "explanation": "為什麼正確答案是對的，以及干擾選項為什麼錯誤的簡短說明"
+    }}
+    """
+    
+    user_prompt = f"""
+    目標單字：{target_word}
+    正確定義：{correct_definition}
+    題目類型：{question_type}
+    
+    請生成3個合適的干擾選項，讓這道題目有適當的鑑別度。
+    """
+    
+    try:
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        
+        if MONITOR_MODE:
+            print("\n" + "="*20 + " 單字測驗選項生成結果 " + "="*20)
+            print(json.dumps(response_data, ensure_ascii=False, indent=2))
+            print("="*60 + "\n")
+        
+        # 驗證格式
+        if not isinstance(response_data.get('wrong_options'), list) or len(response_data['wrong_options']) != 3:
+            raise ValueError("干擾選項格式不正確")
+        
+        return response_data
+        
+    except Exception as e:
+        print(f"AI生成測驗選項時發生錯誤: {e}")
+        # 回傳基本的備用選項
+        return {
+            "question_text": f"請選擇 '{target_word}' 的正確中文意思",
+            "correct_answer": correct_definition,
+            "wrong_options": [
+                "選項A（AI生成失敗）",
+                "選項B（AI生成失敗）", 
+                "選項C（AI生成失敗）"
+            ],
+            "explanation": "測驗選項生成失敗，請手動檢查。"
+        }
+
+def analyze_word_difficulty(word, user_level="intermediate", model_name=None):
+    """AI分析單字難度等級"""
+    
+    system_prompt = f"""
+    你是英語教學專家，請根據以下標準為英文單字評估難度等級（1-5）：
+    
+    難度分級標準：
+    1級：國中基礎詞彙 (cat, run, happy, book)
+    2級：高中常用詞彙 (environment, successful, describe)  
+    3級：大學入學詞彙 (sophisticated, analyze, comprehensive)
+    4級：高階學術詞彙 (methodology, paradigm, correlation)
+    5級：專業/罕見詞彙 (ubiquitous, ephemeral, serendipity)
+    
+    評估考量因素：
+    - 詞彙在日常生活中的使用頻率
+    - 音節複雜度和拼寫難度
+    - 詞根詞綴的複雜程度
+    - 語義的抽象程度
+    - 在台灣英語教育中的出現時機
+    
+    使用者程度參考：{user_level}
+    
+    回傳格式：
+    {{
+        "difficulty_level": 1-5的整數,
+        "frequency_estimate": 1-10000的詞頻估計排名,
+        "reasoning": "難度評估的理由說明",
+        "learning_tips": "學習這個單字的建議方法"
+    }}
+    """
+    
+    user_prompt = f"請評估單字 '{word}' 的難度等級和學習建議。"
+    
+    try:
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        
+        # 確保難度等級在有效範圍內
+        difficulty = response_data.get('difficulty_level', 3)
+        if not isinstance(difficulty, int) or difficulty < 1 or difficulty > 5:
+            difficulty = 3
+        
+        frequency = response_data.get('frequency_estimate', 5000)
+        if not isinstance(frequency, int) or frequency < 1:
+            frequency = 5000
+        
+        return {
+            'difficulty_level': difficulty,
+            'frequency_estimate': frequency,
+            'reasoning': response_data.get('reasoning', '難度分析處理中'),
+            'learning_tips': response_data.get('learning_tips', '建議多練習使用')
+        }
+        
+    except Exception as e:
+        print(f"AI分析單字難度時發生錯誤: {e}")
+        return {
+            'difficulty_level': 3,
+            'frequency_estimate': 5000,
+            'reasoning': 'AI分析失敗，使用預設值',
+            'learning_tips': '建議查閱字典並多加練習'
+        }
+
+def extract_vocabulary_from_translation_error(knowledge_point_data, model_name=None):
+    """從翻譯錯誤中智慧提取應該學習的單字"""
+    
+    system_prompt = """
+    你是英語學習分析專家，需要從學生的翻譯錯誤中提取出「真正值得學習的核心單字」。
+    
+    分析原則：
+    1. 專注於「詞彙類錯誤」，忽略純語法錯誤
+    2. 提取學生不熟悉或用錯的「關鍵單字」
+    3. 優先考慮實用性高的詞彙
+    4. 避免過於基礎或過於冷僻的單字
+    
+    回傳格式：
+    {{
+        "extracted_words": [
+            {{
+                "word": "目標單字",
+                "reason": "為什麼這個單字值得學習",
+                "difficulty_estimate": 1-5,
+                "priority": "high/medium/low"
+            }}
+        ],
+        "analysis_summary": "整體分析說明"
+    }}
+    
+    如果沒有找到合適的單字，回傳空陣列。
+    """
+    
+    user_prompt = f"""
+    請分析以下翻譯錯誤，提取值得學習的單字：
+    
+    錯誤分類：{knowledge_point_data.get('category', '未知')}
+    錯誤子分類：{knowledge_point_data.get('subcategory', '未知')}
+    正確表達：{knowledge_point_data.get('correct_phrase', '未知')}
+    學生原句：{knowledge_point_data.get('user_context_sentence', '未知')}
+    錯誤片段：{knowledge_point_data.get('incorrect_phrase_in_context', '未知')}
+    
+    請從中提取應該加入單字庫的詞彙。
+    """
+    
+    try:
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        
+        if MONITOR_MODE:
+            print("\n" + "="*20 + " 翻譯錯誤單字提取結果 " + "="*20)
+            print(json.dumps(response_data, ensure_ascii=False, indent=2))
+            print("="*60 + "\n")
+        
+        extracted_words = response_data.get('extracted_words', [])
+        
+        # 過濾和驗證提取的單字
+        valid_words = []
+        for word_info in extracted_words:
+            if isinstance(word_info, dict) and 'word' in word_info:
+                # 基本的單字驗證（只包含字母）
+                word = word_info['word'].strip().lower()
+                if word.isalpha() and len(word) > 1:
+                    valid_words.append({
+                        'word': word,
+                        'reason': word_info.get('reason', '翻譯錯誤中發現'),
+                        'difficulty_estimate': word_info.get('difficulty_estimate', 3),
+                        'priority': word_info.get('priority', 'medium')
+                    })
+        
+        return {
+            'extracted_words': valid_words,
+            'analysis_summary': response_data.get('analysis_summary', '分析完成')
+        }
+        
+    except Exception as e:
+        print(f"AI提取翻譯錯誤單字時發生錯誤: {e}")
+        return {
+            'extracted_words': [],
+            'analysis_summary': '提取失敗，請手動檢查'
+        }
+
+def generate_context_fill_question(word, difficulty_level=3, model_name=None):
+    """為指定單字生成語境填空題"""
+    
+    system_prompt = f"""
+    你是英語測驗設計專家，需要為單字 "{word}" 設計一道語境填空題。
+    
+    設計要求：
+    1. 創造一個自然的英文句子，其中包含目標單字
+    2. 句子要有足夠的語境線索，但不能過於明顯
+    3. 難度等級：{difficulty_level}/5
+    4. 句子長度適中，適合台灣學習者
+    
+    回傳格式：
+    {{
+        "question_sentence": "包含空格_____的句子",
+        "complete_sentence": "完整的句子",
+        "target_word": "{word}",
+        "context_hints": ["語境提示1", "語境提示2"],
+        "difficulty_level": {difficulty_level}
+    }}
+    """
+    
+    user_prompt = f"請為單字 '{word}' 設計一道語境填空題，難度等級為 {difficulty_level}。"
+    
+    try:
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        
+        # 驗證必要欄位
+        if 'question_sentence' not in response_data or 'complete_sentence' not in response_data:
+            raise ValueError("語境填空題格式不完整")
+        
+        return response_data
+        
+    except Exception as e:
+        print(f"AI生成語境填空題時發生錯誤: {e}")
+        return {
+            "question_sentence": f"The _____ was very important in this situation.",
+            "complete_sentence": f"The {word} was very important in this situation.",
+            "target_word": word,
+            "context_hints": ["根據語境判斷"],
+            "difficulty_level": difficulty_level
+        }
+
+def batch_enhance_vocabulary_definitions(word_list, model_name=None):
+    """批次增強單字定義（用於改善現有單字庫）"""
+    
+    system_prompt = """
+    你是專業的詞典編輯，需要批次處理多個英文單字，為每個單字提供增強的學習資訊。
+    
+    對於每個單字，請提供：
+    1. 更準確的中文定義
+    2. 實用的例句
+    3. 常用搭配
+    
+    回傳格式：
+    {{
+        "enhanced_definitions": [
+            {{
+                "word": "單字",
+                "improved_definition_zh": "改善的中文定義",
+                "example_sentences": [
+                    {{"en": "英文例句", "zh": "中文翻譯"}}
+                ],
+                "collocations": ["常用搭配"]
+            }}
+        ]
+    }}
+    """
+    
+    word_list_str = ", ".join(word_list)
+    user_prompt = f"請為以下單字提供增強的定義和學習資訊：{word_list_str}"
+    
+    try:
+        response_data = _call_llm_api(system_prompt, user_prompt, model_name, DEFAULT_GENERATION_MODEL)
+        return response_data.get('enhanced_definitions', [])
+        
+    except Exception as e:
+        print(f"AI批次增強單字定義時發生錯誤: {e}")
+        return []
+
+# 字典API整合功能
+
+def fetch_cambridge_definition(word):
+    """調用劍橋字典API（或備用免費API）"""
+    import requests
+    
+    # 首先嘗試免費的字典API（因為劍橋字典API需要付費）
+    try:
+        free_api_url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{word}"
+        response = requests.get(free_api_url, timeout=10)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data and len(data) > 0:
+                entry = data[0]
+                
+                # 提取資訊
+                pronunciation = ""
+                if 'phonetics' in entry:
+                    for phonetic in entry['phonetics']:
+                        if 'text' in phonetic:
+                            pronunciation = phonetic['text']
+                            break
+                
+                definitions = []
+                examples = []
+                part_of_speech = ""
+                
+                if 'meanings' in entry:
+                    for meaning in entry['meanings']:
+                        if not part_of_speech:
+                            part_of_speech = meaning.get('partOfSpeech', '')
+                        
+                        for definition in meaning.get('definitions', []):
+                            definitions.append(definition.get('definition', ''))
+                            if 'example' in definition:
+                                examples.append(definition['example'])
+                
+                return {
+                    'word': word,
+                    'pronunciation_ipa': pronunciation,
+                    'part_of_speech': part_of_speech,
+                    'definition_en': '; '.join(definitions[:2]),  # 取前兩個定義
+                    'examples': examples[:2],  # 取前兩個例句
+                    'source': 'free_dictionary_api'
+                }
+    
+    except Exception as e:
+        print(f"字典API查詢失敗: {e}")
+    
+    # 如果API失敗，回傳None，讓系統使用LLM生成
+    return None
+
+def smart_add_vocabulary_word(word, context=None, source_type='manual', source_reference_id=None):
+    """智慧新增單字：結合字典API和LLM"""
+    
+    print(f"正在智慧分析單字: {word}")
+    
+    # 1. 首先嘗試字典API
+    dict_data = fetch_cambridge_definition(word)
+    
+    # 2. 使用LLM生成完整定義（包含中文）
+    llm_data = generate_vocabulary_definition(word, context)
+    
+    # 3. 合併最佳資訊
+    final_data = {
+        'word': word.lower().strip(),
+        'source_type': source_type,
+        'source_reference_id': source_reference_id,
+        'added_context': context
+    }
+    
+    if dict_data:
+        # 優先使用字典API的音標和英文定義
+        final_data.update({
+            'pronunciation_ipa': dict_data.get('pronunciation_ipa') or llm_data.get('pronunciation_ipa'),
+            'part_of_speech': dict_data.get('part_of_speech') or llm_data.get('part_of_speech'),
+            'definition_en': dict_data.get('definition_en') or llm_data.get('definition_en'),
+            'definition_zh': llm_data.get('definition_zh'),  # LLM的中文定義
+            'difficulty_level': llm_data.get('difficulty_level', 3),
+            'word_frequency_rank': llm_data.get('word_frequency_rank', 5000)
+        })
+        
+        # 合併例句
+        dict_examples = [{'sentence_en': ex, 'source': 'dictionary'} for ex in dict_data.get('examples', [])]
+        llm_examples = [{'sentence_en': ex['en'], 'sentence_zh': ex.get('zh'), 'source': 'llm'} 
+                       for ex in llm_data.get('example_sentences', [])]
+        final_data['examples'] = dict_examples + llm_examples
+        
+    else:
+        # 完全使用LLM資料
+        final_data.update({
+            'pronunciation_ipa': llm_data.get('pronunciation_ipa'),
+            'part_of_speech': llm_data.get('part_of_speech'),
+            'definition_en': llm_data.get('definition_en'),
+            'definition_zh': llm_data.get('definition_zh'),
+            'difficulty_level': llm_data.get('difficulty_level', 3),
+            'word_frequency_rank': llm_data.get('word_frequency_rank', 5000),
+            'examples': [{'sentence_en': ex['en'], 'sentence_zh': ex.get('zh'), 'source': 'llm'} 
+                        for ex in llm_data.get('example_sentences', [])]
+        })
+    
+    return final_data

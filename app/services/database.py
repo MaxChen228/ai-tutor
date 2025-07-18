@@ -535,3 +535,322 @@ def get_daily_learning_events(activity_date):
         events_list.append(event_dict)
     
     return events_list
+
+def init_vocabulary_tables():
+    """初始化單字相關的 PostgreSQL 表格"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        print("正在初始化單字資料庫表格...")
+        
+        # 1. 核心單字表
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vocabulary_words (
+            id SERIAL PRIMARY KEY,
+            word TEXT NOT NULL UNIQUE,
+            
+            -- 字典資訊
+            pronunciation_ipa TEXT,
+            pronunciation_audio_url TEXT,
+            part_of_speech TEXT,
+            definition_zh TEXT NOT NULL,
+            definition_en TEXT,
+            difficulty_level INTEGER DEFAULT 1 CHECK (difficulty_level BETWEEN 1 AND 5),
+            word_frequency_rank INTEGER,
+            
+            -- 學習數據
+            mastery_level REAL DEFAULT 0.0 CHECK (mastery_level BETWEEN 0.0 AND 5.0),
+            total_reviews INTEGER DEFAULT 0,
+            correct_reviews INTEGER DEFAULT 0,
+            consecutive_correct INTEGER DEFAULT 0,
+            last_reviewed_at TIMESTAMPTZ,
+            next_review_at TIMESTAMPTZ,
+            
+            -- 來源追蹤
+            source_type TEXT DEFAULT 'manual' CHECK (source_type IN ('manual', 'translation_error', 'ai_recommend')),
+            source_reference_id INTEGER,
+            added_context TEXT,
+            
+            -- 元數據
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            updated_at TIMESTAMPTZ DEFAULT NOW(),
+            is_archived BOOLEAN DEFAULT FALSE
+        );
+        """)
+        
+        # 2. 例句表
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vocabulary_examples (
+            id SERIAL PRIMARY KEY,
+            word_id INTEGER REFERENCES vocabulary_words(id) ON DELETE CASCADE,
+            sentence_en TEXT NOT NULL,
+            sentence_zh TEXT,
+            source TEXT DEFAULT 'manual' CHECK (source IN ('cambridge', 'llm', 'user_context', 'manual')),
+            difficulty_level INTEGER DEFAULT 1 CHECK (difficulty_level BETWEEN 1 AND 5),
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        """)
+        
+        # 3. 單字關係表（同義詞、反義詞等）
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vocabulary_relations (
+            id SERIAL PRIMARY KEY,
+            word_id INTEGER REFERENCES vocabulary_words(id) ON DELETE CASCADE,
+            related_word_id INTEGER REFERENCES vocabulary_words(id) ON DELETE CASCADE,
+            relation_type TEXT NOT NULL CHECK (relation_type IN ('synonym', 'antonym', 'word_family', 'collocation')),
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            UNIQUE(word_id, related_word_id, relation_type)
+        );
+        """)
+        
+        # 4. 單字複習記錄表
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vocabulary_review_logs (
+            id SERIAL PRIMARY KEY,
+            word_id INTEGER REFERENCES vocabulary_words(id) ON DELETE CASCADE,
+            review_type TEXT NOT NULL CHECK (review_type IN ('flashcard', 'multiple_choice', 'context_fill', 'audio_quiz')),
+            user_response TEXT,
+            correct_answer TEXT,
+            is_correct BOOLEAN NOT NULL,
+            response_time REAL,
+            difficulty_at_time INTEGER,
+            mastery_before REAL,
+            mastery_after REAL,
+            timestamp TIMESTAMPTZ DEFAULT NOW()
+        );
+        """)
+        
+        # 5. 單字測驗題庫表
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS vocabulary_quiz_questions (
+            id SERIAL PRIMARY KEY,
+            word_id INTEGER REFERENCES vocabulary_words(id) ON DELETE CASCADE,
+            question_type TEXT NOT NULL CHECK (question_type IN ('multiple_choice', 'context_fill')),
+            question_text TEXT NOT NULL,
+            correct_answer TEXT NOT NULL,
+            wrong_options TEXT[], -- PostgreSQL 陣列型態，儲存錯誤選項
+            context_sentence TEXT,
+            difficulty_level INTEGER DEFAULT 1,
+            created_at TIMESTAMPTZ DEFAULT NOW()
+        );
+        """)
+        
+        # 建立索引以提升查詢效能
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vocabulary_words_next_review ON vocabulary_words(next_review_at);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vocabulary_words_mastery ON vocabulary_words(mastery_level);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vocabulary_words_source ON vocabulary_words(source_type, source_reference_id);")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_vocabulary_review_logs_word_timestamp ON vocabulary_review_logs(word_id, timestamp);")
+        
+    conn.commit()
+    conn.close()
+    print("單字資料庫表格已準備就緒。")
+
+# 單字CRUD操作函式
+
+def add_vocabulary_word(word_data):
+    """新增單字到資料庫"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO vocabulary_words 
+            (word, pronunciation_ipa, part_of_speech, definition_zh, definition_en, 
+             difficulty_level, source_type, source_reference_id, added_context)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (
+            word_data['word'],
+            word_data.get('pronunciation_ipa'),
+            word_data.get('part_of_speech'),
+            word_data['definition_zh'],
+            word_data.get('definition_en'),
+            word_data.get('difficulty_level', 1),
+            word_data.get('source_type', 'manual'),
+            word_data.get('source_reference_id'),
+            word_data.get('added_context')
+        ))
+        word_id = cursor.fetchone()[0]
+        
+        # 如果有例句，一併新增
+        if 'examples' in word_data:
+            for example in word_data['examples']:
+                cursor.execute("""
+                    INSERT INTO vocabulary_examples (word_id, sentence_en, sentence_zh, source)
+                    VALUES (%s, %s, %s, %s)
+                """, (word_id, example['sentence_en'], example.get('sentence_zh'), example.get('source', 'manual')))
+        
+    conn.commit()
+    conn.close()
+    return word_id
+
+def get_vocabulary_word_by_id(word_id):
+    """根據ID獲取單字完整資訊"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        # 獲取基本單字資訊
+        cursor.execute("SELECT * FROM vocabulary_words WHERE id = %s", (word_id,))
+        word = cursor.fetchone()
+        
+        if not word:
+            conn.close()
+            return None
+            
+        word_dict = dict(word)
+        
+        # 獲取例句
+        cursor.execute("""
+            SELECT sentence_en, sentence_zh, source 
+            FROM vocabulary_examples 
+            WHERE word_id = %s 
+            ORDER BY created_at
+        """, (word_id,))
+        word_dict['examples'] = [dict(example) for example in cursor.fetchall()]
+        
+    conn.close()
+    return word_dict
+
+def get_due_vocabulary_words(limit=20):
+    """獲取今日需要複習的單字"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        # 使用台灣時區
+        utc_now = datetime.datetime.now(datetime.timezone.utc)
+        taipei_offset = datetime.timedelta(hours=8)
+        taipei_now = utc_now + taipei_offset
+        today_in_taipei = taipei_now.date()
+        
+        cursor.execute("""
+            SELECT * FROM vocabulary_words 
+            WHERE (next_review_at IS NULL OR DATE(next_review_at AT TIME ZONE 'UTC' + INTERVAL '8 hours') <= %s)
+            AND is_archived = FALSE
+            ORDER BY mastery_level ASC, last_reviewed_at ASC NULLS FIRST
+            LIMIT %s
+        """, (today_in_taipei, limit))
+        
+        words = cursor.fetchall()
+    conn.close()
+    return [dict(word) for word in words]
+
+def update_vocabulary_mastery(word_id, is_correct, response_time=None, review_type='flashcard'):
+    """更新單字掌握度和複習排程"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        # 獲取當前狀態
+        cursor.execute("""
+            SELECT mastery_level, consecutive_correct, total_reviews, correct_reviews
+            FROM vocabulary_words WHERE id = %s
+        """, (word_id,))
+        
+        result = cursor.fetchone()
+        if not result:
+            conn.close()
+            return False
+            
+        current_mastery, consecutive_correct, total_reviews, correct_reviews = result
+        mastery_before = current_mastery
+        
+        # 計算新的掌握度和間隔
+        if is_correct:
+            new_mastery = min(5.0, current_mastery + 0.3)
+            new_consecutive = consecutive_correct + 1
+            new_correct_reviews = correct_reviews + 1
+            
+            # 計算下次複習間隔（天數）
+            interval_days = max(1, round(2 ** new_mastery))
+        else:
+            new_mastery = max(0.0, current_mastery - 0.4)
+            new_consecutive = 0
+            new_correct_reviews = correct_reviews
+            interval_days = 1  # 明天再複習
+        
+        next_review_date = datetime.date.today() + datetime.timedelta(days=interval_days)
+        
+        # 更新單字狀態
+        cursor.execute("""
+            UPDATE vocabulary_words 
+            SET mastery_level = %s, 
+                consecutive_correct = %s,
+                total_reviews = %s,
+                correct_reviews = %s,
+                last_reviewed_at = %s,
+                next_review_at = %s,
+                updated_at = %s
+            WHERE id = %s
+        """, (
+            new_mastery, new_consecutive, total_reviews + 1, new_correct_reviews,
+            datetime.datetime.now(datetime.timezone.utc), next_review_date,
+            datetime.datetime.now(datetime.timezone.utc), word_id
+        ))
+        
+        # 記錄複習歷史
+        cursor.execute("""
+            INSERT INTO vocabulary_review_logs 
+            (word_id, review_type, is_correct, response_time, mastery_before, mastery_after)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (word_id, review_type, is_correct, response_time, mastery_before, new_mastery))
+        
+    conn.commit()
+    conn.close()
+    return True
+
+def get_vocabulary_statistics():
+    """獲取單字庫統計資訊"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        # 總單字數
+        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE is_archived = FALSE")
+        total_words = cursor.fetchone()[0]
+        
+        # 已掌握單字（掌握度 >= 4.0）
+        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE mastery_level >= 4.0 AND is_archived = FALSE")
+        mastered_words = cursor.fetchone()[0]
+        
+        # 學習中單字（0 < 掌握度 < 4.0）
+        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE mastery_level > 0 AND mastery_level < 4.0 AND is_archived = FALSE")
+        learning_words = cursor.fetchone()[0]
+        
+        # 新單字（掌握度 = 0）
+        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE mastery_level = 0 AND is_archived = FALSE")
+        new_words = cursor.fetchone()[0]
+        
+        # 今日複習數
+        today = datetime.date.today()
+        cursor.execute("""
+            SELECT COUNT(*) FROM vocabulary_words 
+            WHERE DATE(next_review_at AT TIME ZONE 'UTC' + INTERVAL '8 hours') <= %s 
+            AND is_archived = FALSE
+        """, (today,))
+        due_today = cursor.fetchone()[0]
+        
+    conn.close()
+    return {
+        'total_words': total_words,
+        'mastered_words': mastered_words,
+        'learning_words': learning_words,
+        'new_words': new_words,
+        'due_today': due_today
+    }
+
+def search_vocabulary_words(query, limit=50):
+    """搜尋單字"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        cursor.execute("""
+            SELECT * FROM vocabulary_words 
+            WHERE (word ILIKE %s OR definition_zh ILIKE %s) 
+            AND is_archived = FALSE
+            ORDER BY 
+                CASE WHEN word ILIKE %s THEN 1 ELSE 2 END,
+                mastery_level ASC
+            LIMIT %s
+        """, (f'%{query}%', f'%{query}%', f'{query}%', limit))
+        
+        words = cursor.fetchall()
+    conn.close()
+    return [dict(word) for word in words]
+
+# 在原有的 init_db() 函式末尾加入
+def enhanced_init_db():
+    """增強版的資料庫初始化，包含單字表格"""
+    # 先執行原有的初始化
+    init_db()
+    # 再執行單字表格初始化
+    init_vocabulary_tables()
