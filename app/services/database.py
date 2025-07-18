@@ -854,3 +854,60 @@ def enhanced_init_db():
     init_db()
     # 再執行單字表格初始化
     init_vocabulary_tables()
+
+# 在 app/services/database.py 中新增以下缺少的函式
+
+def get_vocabulary_word_by_word(word):
+    """根據單字文本獲取單字資訊（用於檢查重複）"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        cursor.execute("SELECT * FROM vocabulary_words WHERE word = %s", (word.lower(),))
+        word_data = cursor.fetchone()
+    conn.close()
+    return dict(word_data) if word_data else None
+
+def update_vocabulary_word(word_id, update_data):
+    """更新單字資訊"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        allowed_fields = [
+            'pronunciation_ipa', 'part_of_speech', 'definition_zh', 'definition_en',
+            'difficulty_level', 'word_frequency_rank', 'added_context'
+        ]
+        
+        update_fields = []
+        update_values = []
+        
+        for key, value in update_data.items():
+            if key in allowed_fields:
+                update_fields.append(f"{key} = %s")
+                update_values.append(value)
+        
+        if not update_fields:
+            conn.close()
+            return False
+        
+        update_fields.append("updated_at = %s")
+        update_values.append(datetime.datetime.now(datetime.timezone.utc))
+        update_values.append(word_id)
+        
+        query = f"UPDATE vocabulary_words SET {', '.join(update_fields)} WHERE id = %s"
+        cursor.execute(query, tuple(update_values))
+        updated_rows = cursor.rowcount
+        conn.commit()
+    
+    conn.close()
+    return updated_rows > 0
+
+def archive_vocabulary_word(word_id):
+    """歸檔單字"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute(
+            "UPDATE vocabulary_words SET is_archived = TRUE, updated_at = %s WHERE id = %s",
+            (datetime.datetime.now(datetime.timezone.utc), word_id)
+        )
+        updated_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return updated_rows > 0
