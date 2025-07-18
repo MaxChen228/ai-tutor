@@ -3,3 +3,4 @@ openai
 gunicorn
 psycopg2-binary
 google-generativeai
+requests
