@@ -1,11 +1,20 @@
 # app/routes/session.py
 
 from flask import Blueprint, request, jsonify
+from flask_jwt_extended import jwt_required, get_jwt_identity, verify_jwt_in_request
 from app.services import database as db
 from app.services import ai_service as ai
 import random
 
 session_bp = Blueprint('session_bp', __name__)
+
+def get_current_user_id():
+    """獲取當前用戶ID，支持訪客模式"""
+    try:
+        verify_jwt_in_request(optional=True)
+        return get_jwt_identity()
+    except:
+        return None
 
 @session_bp.route("/start_session", methods=['GET'])
 def start_session_endpoint():
@@ -13,6 +22,10 @@ def start_session_endpoint():
     【vNext 版】: 接收 generation_model 參數。
     """
     print("\n[API] 收到請求：開始新的一輪學習...")
+    
+    # 獲取當前用戶ID（可能為None表示訪客模式）
+    user_id = get_current_user_id()
+    print(f"[API] 用戶ID: {user_id if user_id else '訪客模式'}")
     
     try:
         desired_review_count = int(request.args.get('num_review', '3'))
@@ -29,8 +42,8 @@ def start_session_endpoint():
     
     questions_to_ask = []
 
-    if desired_review_count > 0:
-        due_knowledge_points = db.get_due_knowledge_points(desired_review_count)
+    if desired_review_count > 0 and user_id:  # 只有已認證用戶才有複習題
+        due_knowledge_points = db.get_due_knowledge_points_for_user(user_id, desired_review_count)
         actual_num_review = len(due_knowledge_points)
         print(f"[API] 從資料庫中找到 {actual_num_review} 題到期的複習題。")
         
@@ -74,6 +87,11 @@ def submit_answer_endpoint():
     【vNext 版 / 互動式修改】: 接收 grading_model 參數，且不再自動儲存錯誤。
     """
     print("\n[API] 收到請求：批改使用者答案...")
+    
+    # 獲取當前用戶ID（可能為None表示訪客模式）
+    user_id = get_current_user_id()
+    print(f"[API] 批改用戶ID: {user_id if user_id else '訪客模式'}")
+    
     data = request.get_json()
     if not data:
         return jsonify({"error": "請求格式錯誤，需要 JSON 資料。"}), 400

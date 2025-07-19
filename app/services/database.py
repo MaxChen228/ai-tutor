@@ -22,9 +22,43 @@ def init_db():
     conn = get_db_connection()
     with conn.cursor() as cursor:
         print("正在檢查並初始化 PostgreSQL 資料庫...")
+        
+        # 創建用戶表格
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50) UNIQUE NOT NULL,
+            email VARCHAR(100) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            display_name VARCHAR(100),
+            native_language VARCHAR(50) DEFAULT '中文',
+            target_language VARCHAR(50) DEFAULT '英文',
+            learning_level VARCHAR(50) DEFAULT '初級',
+            total_learning_time INTEGER DEFAULT 0,
+            knowledge_points_count INTEGER DEFAULT 0,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            last_login_at TIMESTAMPTZ,
+            is_active BOOLEAN DEFAULT TRUE,
+            email_verified BOOLEAN DEFAULT FALSE
+        );
+        """)
+        
+        # 創建刷新令牌表格
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+            token_hash VARCHAR(255) NOT NULL,
+            expires_at TIMESTAMPTZ NOT NULL,
+            created_at TIMESTAMPTZ DEFAULT NOW(),
+            is_revoked BOOLEAN DEFAULT FALSE
+        );
+        """)
+        
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS learning_events (
             id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             question_type TEXT NOT NULL,
             source_mistake_id INTEGER,
             chinese_sentence TEXT NOT NULL,
@@ -46,9 +80,10 @@ def init_db():
         cursor.execute("""
         CREATE TABLE IF NOT EXISTS knowledge_points (
             id SERIAL PRIMARY KEY,
+            user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
             category TEXT NOT NULL,
             subcategory TEXT NOT NULL,
-            correct_phrase TEXT NOT NULL UNIQUE,
+            correct_phrase TEXT NOT NULL,
             explanation TEXT,
             user_context_sentence TEXT,
             incorrect_phrase_in_context TEXT,
@@ -60,7 +95,8 @@ def init_db():
             next_review_date DATE,
             is_archived BOOLEAN DEFAULT FALSE,
             ai_review_notes TEXT,
-            last_ai_review_date TIMESTAMPTZ
+            last_ai_review_date TIMESTAMPTZ,
+            UNIQUE(user_id, correct_phrase)
         );
         """)
         
@@ -98,7 +134,7 @@ def init_db():
     conn.close()
     print("資料庫表格已準備就緒。")
 
-def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
+def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, user_id=None):
     """將學習事件和知識點弱點存入 PostgreSQL。"""
     conn = get_db_connection()
     with conn.cursor() as cursor:
@@ -129,19 +165,22 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
             primary_error_category = ERROR_CODE_MAP.get(primary_error_code, '分類錯誤')
             primary_error_subcategory = first_error.get('key_point_summary', '子分類錯誤')
 
-        cursor.execute(
-            """
-            INSERT INTO learning_events 
-            (question_type, source_mistake_id, chinese_sentence, user_answer, is_correct, 
-            error_category, error_subcategory, ai_feedback_json, timestamp) 
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (q_type, source_id, chinese, user_answer, is_correct, 
-            primary_error_category, primary_error_subcategory, 
-            feedback_json, datetime.datetime.now(datetime.timezone.utc))
-        )
+        # 只有已認證用戶才記錄學習事件
+        if user_id:
+            cursor.execute(
+                """
+                INSERT INTO learning_events 
+                (user_id, question_type, source_mistake_id, chinese_sentence, user_answer, is_correct, 
+                error_category, error_subcategory, ai_feedback_json, timestamp) 
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (user_id, q_type, source_id, chinese, user_answer, is_correct, 
+                primary_error_category, primary_error_subcategory, 
+                feedback_json, datetime.datetime.now(datetime.timezone.utc))
+            )
         
-        if not is_correct and error_analysis:
+        # 只有已認證用戶才處理知識點
+        if not is_correct and error_analysis and user_id:
             print("\n正在更新您的具體知識點弱點分析...")
             for error in error_analysis:
                 correct_phrase = error.get('correction')
@@ -160,7 +199,7 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
                 if not category or not subcategory or not correct_phrase:
                     continue
 
-                cursor.execute("SELECT id, mastery_level FROM knowledge_points WHERE correct_phrase = %s", (correct_phrase,))
+                cursor.execute("SELECT id, mastery_level FROM knowledge_points WHERE user_id = %s AND correct_phrase = %s", (user_id, correct_phrase))
                 point = cursor.fetchone()
                 severity_penalty = 0.5 if error.get('severity') == 'major' else 0.2
 
@@ -179,10 +218,10 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None):
                 else:
                     cursor.execute(
                         """
-                        INSERT INTO knowledge_points (category, subcategory, correct_phrase, explanation, user_context_sentence, incorrect_phrase_in_context, key_point_summary, mistake_count, mastery_level, last_reviewed_on, next_review_date)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, 1, 0.0, %s, %s)
+                        INSERT INTO knowledge_points (user_id, category, subcategory, correct_phrase, explanation, user_context_sentence, incorrect_phrase_in_context, key_point_summary, mistake_count, mastery_level, last_reviewed_on, next_review_date)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, 0.0, %s, %s)
                         """,
-                        (category, subcategory, correct_phrase, explanation, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1))
+                        (user_id, category, subcategory, correct_phrase, explanation, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1))
                     )
                     print(f"  - 已發現新弱點：[{summary}]，已加入複習計畫。")
     conn.commit()
@@ -230,7 +269,7 @@ def update_knowledge_point_mastery(point_id, current_mastery):
         print(f"⚠️ 警告：更新知識點 ID: {point_id} 時，資料庫中沒有找到對應的紀錄，更新失敗！影響行數: {updated_rows}。")
 
 def get_due_knowledge_points(limit):
-    """根據台灣時區 (UTC+8) 來獲取當天到期的知識點。"""
+    """根據台灣時區 (UTC+8) 來獲取當天到期的知識點。(舊版本，保持向後兼容)"""
     conn = get_db_connection()
     with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
         utc_now = datetime.datetime.now(datetime.timezone.utc)
@@ -246,6 +285,28 @@ def get_due_knowledge_points(limit):
             LIMIT %s
             """,
             (today_in_taipei, limit)
+        )
+        points = cursor.fetchall()
+    conn.close()
+    return points
+
+def get_due_knowledge_points_for_user(user_id, limit):
+    """根據用戶ID和台灣時區 (UTC+8) 來獲取當天到期的知識點。"""
+    conn = get_db_connection()
+    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
+        utc_now = datetime.datetime.now(datetime.timezone.utc)
+        taipei_offset = datetime.timedelta(hours=8)
+        taipei_now = utc_now + taipei_offset
+        today_in_taipei = taipei_now.date()
+        print(f"[API] 用戶 {user_id} 伺服器UTC日期: {utc_now.date()} | 校準後台北日期: {today_in_taipei}")
+        cursor.execute(
+            """
+            SELECT * FROM knowledge_points 
+            WHERE user_id = %s AND next_review_date <= %s AND is_archived = FALSE
+            ORDER BY mastery_level ASC, last_reviewed_on ASC
+            LIMIT %s
+            """,
+            (user_id, today_in_taipei, limit)
         )
         points = cursor.fetchall()
     conn.close()
@@ -854,6 +915,172 @@ def enhanced_init_db():
     init_db()
     # 再執行單字表格初始化
     init_vocabulary_tables()
+
+# MARK: - 用戶認證相關函式
+
+def create_user(username, email, password_hash, display_name=None, native_language='中文', target_language='英文', learning_level='初級'):
+    """創建新用戶"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO users (username, email, password_hash, display_name, native_language, target_language, learning_level)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            RETURNING id, username, email, display_name, native_language, target_language, learning_level, 
+                     total_learning_time, knowledge_points_count, created_at, last_login_at
+        """, (username, email, password_hash, display_name, native_language, target_language, learning_level))
+        
+        user_data = cursor.fetchone()
+        conn.commit()
+    conn.close()
+    
+    if user_data:
+        return {
+            'id': user_data[0],
+            'username': user_data[1],
+            'email': user_data[2],
+            'display_name': user_data[3],
+            'native_language': user_data[4],
+            'target_language': user_data[5],
+            'learning_level': user_data[6],
+            'total_learning_time': user_data[7],
+            'knowledge_points_count': user_data[8],
+            'created_at': user_data[9].isoformat() if user_data[9] else None,
+            'last_login_at': user_data[10].isoformat() if user_data[10] else None
+        }
+    return None
+
+def get_user_by_email(email):
+    """根據email獲取用戶"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT id, username, email, password_hash, display_name, native_language, target_language, 
+                   learning_level, total_learning_time, knowledge_points_count, created_at, last_login_at, is_active
+            FROM users WHERE email = %s AND is_active = TRUE
+        """, (email,))
+        
+        user_data = cursor.fetchone()
+    conn.close()
+    
+    if user_data:
+        return {
+            'id': user_data[0],
+            'username': user_data[1],
+            'email': user_data[2],
+            'password_hash': user_data[3],
+            'display_name': user_data[4],
+            'native_language': user_data[5],
+            'target_language': user_data[6],
+            'learning_level': user_data[7],
+            'total_learning_time': user_data[8],
+            'knowledge_points_count': user_data[9],
+            'created_at': user_data[10].isoformat() if user_data[10] else None,
+            'last_login_at': user_data[11].isoformat() if user_data[11] else None,
+            'is_active': user_data[12]
+        }
+    return None
+
+def get_user_by_id(user_id):
+    """根據ID獲取用戶"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT id, username, email, display_name, native_language, target_language, 
+                   learning_level, total_learning_time, knowledge_points_count, created_at, last_login_at
+            FROM users WHERE id = %s AND is_active = TRUE
+        """, (user_id,))
+        
+        user_data = cursor.fetchone()
+    conn.close()
+    
+    if user_data:
+        return {
+            'id': user_data[0],
+            'username': user_data[1],
+            'email': user_data[2],
+            'display_name': user_data[3],
+            'native_language': user_data[4],
+            'target_language': user_data[5],
+            'learning_level': user_data[6],
+            'total_learning_time': user_data[7],
+            'knowledge_points_count': user_data[8],
+            'created_at': user_data[9].isoformat() if user_data[9] else None,
+            'last_login_at': user_data[10].isoformat() if user_data[10] else None
+        }
+    return None
+
+def update_user_last_login(user_id):
+    """更新用戶最後登入時間"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            UPDATE users SET last_login_at = NOW() WHERE id = %s
+        """, (user_id,))
+        conn.commit()
+    conn.close()
+
+def store_refresh_token(user_id, token_hash, expires_at):
+    """儲存刷新令牌"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+            VALUES (%s, %s, %s)
+            RETURNING id
+        """, (user_id, token_hash, expires_at))
+        
+        token_id = cursor.fetchone()[0]
+        conn.commit()
+    conn.close()
+    return token_id
+
+def get_refresh_token(token_hash):
+    """獲取刷新令牌"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            SELECT rt.id, rt.user_id, rt.expires_at, rt.is_revoked, u.is_active
+            FROM refresh_tokens rt
+            JOIN users u ON rt.user_id = u.id
+            WHERE rt.token_hash = %s
+        """, (token_hash,))
+        
+        token_data = cursor.fetchone()
+    conn.close()
+    
+    if token_data:
+        return {
+            'id': token_data[0],
+            'user_id': token_data[1],
+            'expires_at': token_data[2],
+            'is_revoked': token_data[3],
+            'user_is_active': token_data[4]
+        }
+    return None
+
+def revoke_refresh_token(token_hash):
+    """撤銷刷新令牌"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            UPDATE refresh_tokens SET is_revoked = TRUE WHERE token_hash = %s
+        """, (token_hash,))
+        updated_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return updated_rows > 0
+
+def cleanup_expired_tokens():
+    """清理過期的刷新令牌"""
+    conn = get_db_connection()
+    with conn.cursor() as cursor:
+        cursor.execute("""
+            DELETE FROM refresh_tokens WHERE expires_at < NOW() OR is_revoked = TRUE
+        """, )
+        deleted_rows = cursor.rowcount
+        conn.commit()
+    conn.close()
+    return deleted_rows
 
 # 在 app/services/database.py 中新增以下缺少的函式
 

@@ -4,3 +4,7 @@ gunicorn
 psycopg2-binary
 google-generativeai
 requests
+flask-jwt-extended
+werkzeug
+bcrypt
+python-dotenv
