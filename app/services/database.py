@@ -134,8 +134,8 @@ def init_db():
     conn.close()
     print("資料庫表格已準備就緒。")
 
-def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, user_id=None):
-    """將學習事件和知識點弱點存入 PostgreSQL。"""
+def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, user_id=None, enable_auto_linking=True):
+    """將學習事件和知識點弱點存入 PostgreSQL，並自動生成向量與關聯。"""
     conn = get_db_connection()
     with conn.cursor() as cursor:
         is_correct = feedback_data.get('is_generally_correct', False)
@@ -179,6 +179,9 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, 
                 feedback_json, datetime.datetime.now(datetime.timezone.utc))
             )
         
+        # 收集新增或更新的知識點ID，用於後續向量處理
+        processed_point_ids = []
+        
         # 只有已認證用戶才處理知識點
         if not is_correct and error_analysis and user_id:
             print("\n正在更新您的具體知識點弱點分析...")
@@ -214,18 +217,48 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, 
                         """,
                         (new_mastery_level, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1), category, subcategory, point[0])
                     )
+                    processed_point_ids.append(point[0])
                     print(f"  - 已更新弱點：[{summary}]，熟練度下降。")
                 else:
                     cursor.execute(
                         """
                         INSERT INTO knowledge_points (user_id, category, subcategory, correct_phrase, explanation, user_context_sentence, incorrect_phrase_in_context, key_point_summary, mistake_count, mastery_level, last_reviewed_on, next_review_date)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1, 0.0, %s, %s)
+                        RETURNING id
                         """,
                         (user_id, category, subcategory, correct_phrase, explanation, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1))
                     )
+                    new_point_id = cursor.fetchone()[0]
+                    processed_point_ids.append(new_point_id)
                     print(f"  - 已發現新弱點：[{summary}]，已加入複習計畫。")
+    
     conn.commit()
     conn.close()
+    
+    # 處理向量生成與自動關聯（在資料庫事務外執行，避免阻塞）
+    if enable_auto_linking and processed_point_ids:
+        print("\n正在為知識點生成語義向量與建立關聯...")
+        from app.services.embedding_service import generate_and_store_embedding_for_point, auto_link_knowledge_point
+        
+        for point_id in processed_point_ids:
+            try:
+                # 獲取知識點完整資料
+                point_data = get_knowledge_point_by_id(point_id)
+                if point_data:
+                    # 生成並儲存向量
+                    if generate_and_store_embedding_for_point(point_data):
+                        print(f"  - 已為知識點 {point_id} 生成語義向量")
+                        
+                        # 自動建立關聯
+                        link_count = auto_link_knowledge_point(point_id)
+                        if link_count > 0:
+                            print(f"  - 已為知識點 {point_id} 建立 {link_count} 個語義關聯")
+                    else:
+                        print(f"  - 知識點 {point_id} 向量生成失敗，跳過關聯建立")
+            except Exception as e:
+                print(f"  - 處理知識點 {point_id} 的向量與關聯時發生錯誤: {e}")
+                continue
+    
     if not is_correct:
         print(f"\n(本句主要錯誤已歸檔：{primary_error_category} - {primary_error_subcategory})")
 

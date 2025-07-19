@@ -42,10 +42,12 @@ def create_app():
     from .routes.data import data_bp
     from .routes.vocabulary import vocabulary_bp
     from .routes.auth import auth_bp  # 新增認證路由
+    from .routes.embedding import embedding_bp  # 新增向量化路由
     
     app.register_blueprint(session_bp, url_prefix='/api')
     app.register_blueprint(data_bp, url_prefix='/api')
     app.register_blueprint(vocabulary_bp, url_prefix='/api/vocabulary')
     app.register_blueprint(auth_bp, url_prefix='/api/auth')  # 新增認證路由
+    app.register_blueprint(embedding_bp, url_prefix='/api')  # 新增向量化路由
     
     return app
