@@ -1,34 +1,65 @@
-# app/services/database.py
-
 import os
+import psycopg
+from psycopg.rows import dict_row
 import datetime
 import json
 
-# 使用適配器以支援 psycopg2 和 psycopg3
-try:
-    from .psycopg_adapter import psycopg2_compat as psycopg2, get_db_connection_with_adapter, get_psycopg_info
-    import psycopg2.extras
-    print(f"✅ 資料庫適配器載入成功: {get_psycopg_info()}")
-except ImportError:
-    # 回退到原始 psycopg2
-    import psycopg2
-    import psycopg2.extras
-    print("⚠️ 使用原始 psycopg2（適配器不可用）")
-    
-    def get_db_connection_with_adapter():
-        database_url = os.environ.get('DATABASE_URL')
-        return psycopg2.connect(database_url)
+# 全域資料庫連接池
+db_pool = None
 
-DATABASE_URL = os.environ.get('DATABASE_URL')
+def init_app(app):
+    """初始化資料庫連接池。"""
+    global db_pool
+    try:
+        conn_info = os.getenv("DATABASE_URL")
+        if not conn_info:
+            raise ValueError("DATABASE_URL 環境變數未設定")
+        
+        # 根據 DATABASE_URL 建立連接池設定
+        db_pool = psycopg.conninfo.conninfo_to_dict(conn_info)
+        print("✅ 資料庫服務初始化成功 (使用 psycopg v3 連接池)。")
+
+    except Exception as e:
+        print(f"❌ 資料庫連接池初始化失敗: {e}")
+        db_pool = None
 
 def get_db_connection():
-    """建立並回傳一個新的 PostgreSQL 資料庫連線。"""
+    """從連接池獲取一個新的資料庫連接。"""
+    if not db_pool:
+        raise ConnectionError("資料庫未初始化或初始化失敗。")
+    # row_factory=dict_row 讓查詢結果以字典形式返回 (取代舊的 DictCursor)
+    return psycopg.connect(**db_pool, row_factory=dict_row)
+
+def execute_query(query, params=None, fetch=None):
+    """
+    執行 SQL 查詢的統一函式。
+    :param query: SQL 查詢語句
+    :param params: 查詢參數
+    :param fetch: 'one' (獲取單筆), 'all' (獲取所有), None (執行不返回結果的命令)
+    """
+    conn = None
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        return conn
-    except psycopg2.OperationalError as e:
-        print(f"資料庫連接失敗: {e}")
-        exit()
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute(query, params)
+            
+            if fetch == 'one':
+                result = cur.fetchone()
+            elif fetch == 'all':
+                result = cur.fetchall()
+            else:
+                conn.commit()
+                result = cur.rowcount # 返回受影響的行數
+            
+            return result
+    except Exception as e:
+        if conn:
+            conn.rollback()
+        print(f"❌ 資料庫查詢失敗: {e}")
+        raise
+    finally:
+        if conn:
+            conn.close()
 
 def init_db():
     """初始化 PostgreSQL 資料庫和表格。"""
@@ -220,7 +251,7 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, 
                 severity_penalty = 0.5 if error.get('severity') == 'major' else 0.2
 
                 if point:
-                    new_mastery_level = max(0, point[1] - severity_penalty)
+                    new_mastery_level = max(0, point['mastery_level'] - severity_penalty)
                     cursor.execute(
                         """
                         UPDATE knowledge_points 
@@ -228,9 +259,9 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, 
                         category = %s, subcategory = %s
                         WHERE id = %s
                         """,
-                        (new_mastery_level, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1), category, subcategory, point[0])
+                        (new_mastery_level, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1), category, subcategory, point['id'])
                     )
-                    processed_point_ids.append(point[0])
+                    processed_point_ids.append(point['id'])
                     print(f"  - 已更新弱點：[{summary}]，熟練度下降。")
                 else:
                     cursor.execute(
@@ -241,7 +272,7 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, 
                         """,
                         (user_id, category, subcategory, correct_phrase, explanation, user_answer, incorrect_phrase, summary, datetime.datetime.now(datetime.timezone.utc), datetime.date.today() + datetime.timedelta(days=1))
                     )
-                    new_point_id = cursor.fetchone()[0]
+                    new_point_id = cursor.fetchone()['id']
                     processed_point_ids.append(new_point_id)
                     print(f"  - 已發現新弱點：[{summary}]，已加入複習計畫。")
     
@@ -251,30 +282,32 @@ def add_mistake(question_data, user_answer, feedback_data, exclude_phrase=None, 
     # 處理向量生成與自動關聯（在資料庫事務外執行，避免阻塞）
     if enable_auto_linking and processed_point_ids:
         print("\n正在為知識點生成語義向量與建立關聯...")
-        from app.services.embedding_service import generate_and_store_embedding_for_point, auto_link_knowledge_point
-        
-        for point_id in processed_point_ids:
-            try:
-                # 獲取知識點完整資料
-                point_data = get_knowledge_point_by_id(point_id)
-                if point_data:
-                    # 生成並儲存向量
-                    if generate_and_store_embedding_for_point(point_data):
-                        print(f"  - 已為知識點 {point_id} 生成語義向量")
-                        
-                        # 自動建立關聯
-                        link_count = auto_link_knowledge_point(point_id)
-                        if link_count > 0:
-                            print(f"  - 已為知識點 {point_id} 建立 {link_count} 個語義關聯")
-                    else:
-                        print(f"  - 知識點 {point_id} 向量生成失敗，跳過關聯建立")
-            except Exception as e:
-                print(f"  - 處理知識點 {point_id} 的向量與關聯時發生錯誤: {e}")
-                continue
+        try:
+            from app.services.embedding_service import generate_and_store_embedding_for_point, auto_link_knowledge_point
+            
+            for point_id in processed_point_ids:
+                try:
+                    # 獲取知識點完整資料
+                    point_data = get_knowledge_point_by_id(point_id)
+                    if point_data:
+                        # 生成並儲存向量
+                        if generate_and_store_embedding_for_point(point_data):
+                            print(f"  - 已為知識點 {point_id} 生成語義向量")
+                            
+                            # 自動建立關聯
+                            link_count = auto_link_knowledge_point(point_id)
+                            if link_count > 0:
+                                print(f"  - 已為知識點 {point_id} 建立 {link_count} 個語義關聯")
+                        else:
+                            print(f"  - 知識點 {point_id} 向量生成失敗，跳過關聯建立")
+                except Exception as e:
+                    print(f"  - 處理知識點 {point_id} 的向量與關聯時發生錯誤: {e}")
+                    continue
+        except ImportError:
+            print("  - 向量服務未啟用，跳過語義關聯建立")
     
     if not is_correct:
         print(f"\n(本句主要錯誤已歸檔：{primary_error_category} - {primary_error_subcategory})")
-
 
 def update_knowledge_point_mastery(point_id, current_mastery):
     """更新答對的知識點熟練度。"""
@@ -289,25 +322,14 @@ def update_knowledge_point_mastery(point_id, current_mastery):
     interval_days = max(1, round(2 ** new_mastery_level))
     next_review_date = datetime.date.today() + datetime.timedelta(days=interval_days)
     
-    conn = get_db_connection()
-    updated_rows = 0
-    try:
-        with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                UPDATE knowledge_points 
-                SET mastery_level = %s, correct_count = correct_count + 1, next_review_date = %s 
-                WHERE id = %s
-                """,
-                (new_mastery_level, next_review_date, int(point_id))
-            )
-            updated_rows = cursor.rowcount
-            conn.commit()
-    except Exception as e:
-        print(f"[ERROR] 更新 knowledge_point 時發生資料庫錯誤: {e}")
-        conn.rollback()
-    finally:
-        conn.close()
+    updated_rows = execute_query(
+        """
+        UPDATE knowledge_points 
+        SET mastery_level = %s, correct_count = correct_count + 1, next_review_date = %s 
+        WHERE id = %s
+        """,
+        (new_mastery_level, next_review_date, int(point_id))
+    )
 
     if updated_rows > 0:
         print(f"✅ 知識點 ID: {point_id} 已成功更新！影響行數: {updated_rows}。安排在 {interval_days} 天後複習。")
@@ -316,76 +338,70 @@ def update_knowledge_point_mastery(point_id, current_mastery):
 
 def get_due_knowledge_points(limit):
     """根據台灣時區 (UTC+8) 來獲取當天到期的知識點。(舊版本，保持向後兼容)"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        utc_now = datetime.datetime.now(datetime.timezone.utc)
-        taipei_offset = datetime.timedelta(hours=8)
-        taipei_now = utc_now + taipei_offset
-        today_in_taipei = taipei_now.date()
-        print(f"[API] 伺服器UTC日期: {utc_now.date()} | 校準後台北日期: {today_in_taipei}")
-        cursor.execute(
-            """
-            SELECT * FROM knowledge_points 
-            WHERE next_review_date <= %s AND is_archived = FALSE
-            ORDER BY mastery_level ASC, last_reviewed_on ASC
-            LIMIT %s
-            """,
-            (today_in_taipei, limit)
-        )
-        points = cursor.fetchall()
-    conn.close()
-    return points
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    taipei_offset = datetime.timedelta(hours=8)
+    taipei_now = utc_now + taipei_offset
+    today_in_taipei = taipei_now.date()
+    print(f"[API] 伺服器UTC日期: {utc_now.date()} | 校準後台北日期: {today_in_taipei}")
+    
+    return execute_query(
+        """
+        SELECT * FROM knowledge_points 
+        WHERE next_review_date <= %s AND is_archived = FALSE
+        ORDER BY mastery_level ASC, last_reviewed_on ASC
+        LIMIT %s
+        """,
+        (today_in_taipei, limit),
+        fetch='all'
+    )
 
 def get_due_knowledge_points_for_user(user_id, limit):
     """根據用戶ID和台灣時區 (UTC+8) 來獲取當天到期的知識點。"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        utc_now = datetime.datetime.now(datetime.timezone.utc)
-        taipei_offset = datetime.timedelta(hours=8)
-        taipei_now = utc_now + taipei_offset
-        today_in_taipei = taipei_now.date()
-        print(f"[API] 用戶 {user_id} 伺服器UTC日期: {utc_now.date()} | 校準後台北日期: {today_in_taipei}")
-        cursor.execute(
-            """
-            SELECT * FROM knowledge_points 
-            WHERE user_id = %s AND next_review_date <= %s AND is_archived = FALSE
-            ORDER BY mastery_level ASC, last_reviewed_on ASC
-            LIMIT %s
-            """,
-            (user_id, today_in_taipei, limit)
-        )
-        points = cursor.fetchall()
-    conn.close()
-    return points
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    taipei_offset = datetime.timedelta(hours=8)
+    taipei_now = utc_now + taipei_offset
+    today_in_taipei = taipei_now.date()
+    print(f"[API] 用戶 {user_id} 伺服器UTC日期: {utc_now.date()} | 校準後台北日期: {today_in_taipei}")
+    
+    return execute_query(
+        """
+        SELECT * FROM knowledge_points 
+        WHERE user_id = %s AND next_review_date <= %s AND is_archived = FALSE
+        ORDER BY mastery_level ASC, last_reviewed_on ASC
+        LIMIT %s
+        """,
+        (user_id, today_in_taipei, limit),
+        fetch='all'
+    )
 
 def get_daily_activity(year, month):
     """查詢特定月份的每日學習活動數量。"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        query = """
+    activities = execute_query(
+        """
         SELECT DATE_TRUNC('day', timestamp AT TIME ZONE 'UTC')::date AS activity_date, COUNT(id) AS activity_count
         FROM learning_events
         WHERE EXTRACT(YEAR FROM timestamp AT TIME ZONE 'UTC') = %s AND EXTRACT(MONTH FROM timestamp AT TIME ZONE 'UTC') = %s
         GROUP BY activity_date ORDER BY activity_date;
-        """
-        cursor.execute(query, (year, month))
-        activities = cursor.fetchall()
-    conn.close()
+        """,
+        (year, month),
+        fetch='all'
+    )
+    
     heatmap_data = {activity['activity_date'].isoformat(): activity['activity_count'] for activity in activities}
     return heatmap_data
 
 def get_daily_details(activity_date):
     """查詢特定日期的學習詳情，並區分為「已複習」和「新學習」。"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        query = """
+    events = execute_query(
+        """
         SELECT question_type, ai_feedback_json, response_time
         FROM learning_events
         WHERE DATE(timestamp AT TIME ZONE 'UTC' + INTERVAL '8 hours') = %s;
-        """
-        cursor.execute(query, (activity_date,))
-        events = cursor.fetchall()
-    conn.close()
+        """,
+        (activity_date,),
+        fetch='all'
+    )
+    
     total_seconds, reviewed_points, new_points = 0, {}, {}
     for event in events:
         if event['response_time']:
@@ -412,191 +428,167 @@ def get_daily_details(activity_date):
 
 def update_knowledge_point_details(point_id, details):
     """更新單一知識點的詳細資訊。"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        # 允許更新的欄位列表
-        allowed_fields = [
-            'correct_phrase', 'explanation', 'key_point_summary', 
-            'category', 'subcategory', 'user_context_sentence', 
-            'incorrect_phrase_in_context', 'ai_review_notes'
-        ]
-        update_fields = []
-        update_values = []
-        
-        for key, value in details.items():
-            if key in allowed_fields:
-                update_fields.append(f"{key} = %s")
-                update_values.append(value)
-        
-        if not update_fields:
-            return False, "沒有任何允許更新的欄位。"
+    allowed_fields = [
+        'correct_phrase', 'explanation', 'key_point_summary', 
+        'category', 'subcategory', 'user_context_sentence', 
+        'incorrect_phrase_in_context', 'ai_review_notes'
+    ]
+    update_fields = []
+    update_values = []
+    
+    for key, value in details.items():
+        if key in allowed_fields:
+            update_fields.append(f"{key} = %s")
+            update_values.append(value)
+    
+    if not update_fields:
+        return False, "沒有任何允許更新的欄位。"
 
-        update_values.append(point_id)
-        query = f"UPDATE knowledge_points SET {', '.join(update_fields)} WHERE id = %s"
-        
-        cursor.execute(query, tuple(update_values))
-        updated_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    update_values.append(point_id)
+    query = f"UPDATE knowledge_points SET {', '.join(update_fields)} WHERE id = %s"
+    
+    updated_rows = execute_query(query, tuple(update_values))
     return updated_rows > 0, f"成功更新 {updated_rows} 個知識點。"
 
 def update_knowledge_point_ai_review(point_id, ai_review_notes):
     """更新知識點的AI審閱結果。"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute(
-            """
-            UPDATE knowledge_points 
-            SET ai_review_notes = %s, last_ai_review_date = %s
-            WHERE id = %s
-            """,
-            (ai_review_notes, datetime.datetime.now(datetime.timezone.utc), point_id)
-        )
-        updated_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    updated_rows = execute_query(
+        """
+        UPDATE knowledge_points 
+        SET ai_review_notes = %s, last_ai_review_date = %s
+        WHERE id = %s
+        """,
+        (ai_review_notes, datetime.datetime.now(datetime.timezone.utc), point_id)
+    )
     return updated_rows > 0
 
 def set_knowledge_point_archived_status(point_id, is_archived):
     """設定知識點的封存狀態。"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("UPDATE knowledge_points SET is_archived = %s WHERE id = %s", (is_archived, point_id))
-        updated_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    updated_rows = execute_query(
+        "UPDATE knowledge_points SET is_archived = %s WHERE id = %s", 
+        (is_archived, point_id)
+    )
     return updated_rows > 0
 
 def delete_knowledge_point(point_id):
     """根據 ID 刪除一個知識點。"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("DELETE FROM knowledge_points WHERE id = %s", (point_id,))
-        deleted_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    deleted_rows = execute_query(
+        "DELETE FROM knowledge_points WHERE id = %s", 
+        (point_id,)
+    )
     return deleted_rows > 0
 
 def batch_update_knowledge_points_archived_status(point_ids, is_archived):
     """批次更新知識點的封存狀態。"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute(
-            "UPDATE knowledge_points SET is_archived = %s WHERE id = ANY(%s)",
-            (is_archived, point_ids)
-        )
-        updated_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    updated_rows = execute_query(
+        "UPDATE knowledge_points SET is_archived = %s WHERE id = ANY(%s)",
+        (is_archived, point_ids)
+    )
     return updated_rows
 
 def get_knowledge_point_phrase(point_id):
     """根據 ID 獲取單一知識點的 correct_phrase。"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT correct_phrase FROM knowledge_points WHERE id = %s", (point_id,))
-        result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
+    result = execute_query(
+        "SELECT correct_phrase FROM knowledge_points WHERE id = %s", 
+        (point_id,), 
+        fetch='one'
+    )
+    return result['correct_phrase'] if result else None
 
 def get_knowledge_point_by_id(point_id):
     """根據 ID 獲取完整的知識點資料。"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        cursor.execute(
-            """
-            SELECT id, category, subcategory, correct_phrase, explanation, 
-                   user_context_sentence, incorrect_phrase_in_context, 
-                   key_point_summary, mastery_level, mistake_count, 
-                   correct_count, next_review_date, ai_review_notes, 
-                   last_ai_review_date, is_archived
-            FROM knowledge_points 
-            WHERE id = %s
-            """,
-            (point_id,)
-        )
-        point = cursor.fetchone()
-    conn.close()
+    point = execute_query(
+        """
+        SELECT id, category, subcategory, correct_phrase, explanation, 
+               user_context_sentence, incorrect_phrase_in_context, 
+               key_point_summary, mastery_level, mistake_count, 
+               correct_count, next_review_date, ai_review_notes, 
+               last_ai_review_date, is_archived
+        FROM knowledge_points 
+        WHERE id = %s
+        """,
+        (point_id,),
+        fetch='one'
+    )
     
     if point:
-        point_dict = dict(point)
-        if point_dict.get('next_review_date'):
-            point_dict['next_review_date'] = point_dict['next_review_date'].isoformat()
-        if point_dict.get('last_ai_review_date'):
-            point_dict['last_ai_review_date'] = point_dict['last_ai_review_date'].isoformat()
-        return point_dict
+        if point.get('next_review_date'):
+            point['next_review_date'] = point['next_review_date'].isoformat()
+        if point.get('last_ai_review_date'):
+            point['last_ai_review_date'] = point['last_ai_review_date'].isoformat()
+        return point
     return None
 
 def get_all_knowledge_points():
     """獲取所有未封存的知識點，用於儀表板。"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        cursor.execute("""
-            SELECT id, category, subcategory, correct_phrase, explanation, 
-                   user_context_sentence, incorrect_phrase_in_context, 
-                   key_point_summary, mastery_level, mistake_count, 
-                   correct_count, next_review_date, ai_review_notes, 
-                   last_ai_review_date
-            FROM knowledge_points 
-            WHERE is_archived = FALSE
-            ORDER BY mastery_level ASC, mistake_count DESC
-        """)
-        points_raw = cursor.fetchall()
-    conn.close()
+    points_raw = execute_query(
+        """
+        SELECT id, category, subcategory, correct_phrase, explanation, 
+               user_context_sentence, incorrect_phrase_in_context, 
+               key_point_summary, mastery_level, mistake_count, 
+               correct_count, next_review_date, ai_review_notes, 
+               last_ai_review_date
+        FROM knowledge_points 
+        WHERE is_archived = FALSE
+        ORDER BY mastery_level ASC, mistake_count DESC
+        """,
+        fetch='all'
+    )
+    
     points_dict = []
     for row in points_raw:
-        row_dict = dict(row)
-        if row_dict.get('next_review_date'):
-            row_dict['next_review_date'] = row_dict['next_review_date'].isoformat()
-        if row_dict.get('last_ai_review_date'):
-            row_dict['last_ai_review_date'] = row_dict['last_ai_review_date'].isoformat()
-        points_dict.append(row_dict)
+        if row.get('next_review_date'):
+            row['next_review_date'] = row['next_review_date'].isoformat()
+        if row.get('last_ai_review_date'):
+            row['last_ai_review_date'] = row['last_ai_review_date'].isoformat()
+        points_dict.append(row)
     return points_dict
 
 def get_archived_knowledge_points():
     """獲取所有已封存的知識點。"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        cursor.execute("""
-            SELECT id, category, subcategory, correct_phrase, explanation, 
-                   user_context_sentence, incorrect_phrase_in_context, 
-                   key_point_summary, mastery_level, mistake_count, 
-                   correct_count, next_review_date, ai_review_notes, 
-                   last_ai_review_date
-            FROM knowledge_points 
-            WHERE is_archived = TRUE
-            ORDER BY last_reviewed_on DESC
-        """)
-        points_raw = cursor.fetchall()
-    conn.close()
+    points_raw = execute_query(
+        """
+        SELECT id, category, subcategory, correct_phrase, explanation, 
+               user_context_sentence, incorrect_phrase_in_context, 
+               key_point_summary, mastery_level, mistake_count, 
+               correct_count, next_review_date, ai_review_notes, 
+               last_ai_review_date
+        FROM knowledge_points 
+        WHERE is_archived = TRUE
+        ORDER BY last_reviewed_on DESC
+        """,
+        fetch='all'
+    )
+    
     points_dict = []
     for row in points_raw:
-        row_dict = dict(row)
-        if row_dict.get('next_review_date'):
-            row_dict['next_review_date'] = row_dict['next_review_date'].isoformat()
-        if row_dict.get('last_ai_review_date'):
-            row_dict['last_ai_review_date'] = row_dict['last_ai_review_date'].isoformat()
-        points_dict.append(row_dict)
+        if row.get('next_review_date'):
+            row['next_review_date'] = row['next_review_date'].isoformat()
+        if row.get('last_ai_review_date'):
+            row['last_ai_review_date'] = row['last_ai_review_date'].isoformat()
+        points_dict.append(row)
     return points_dict
 
 def get_flashcards_by_types(types_to_fetch):
     """根據錯誤類型獲取單字卡。"""
     flashcards, unique_checker = [], set()
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("SELECT ai_feedback_json FROM learning_events WHERE is_correct = false")
-        all_events = cursor.fetchall()
-    conn.close()
+    all_events = execute_query(
+        "SELECT ai_feedback_json FROM learning_events WHERE is_correct = false",
+        fetch='all'
+    )
+    
     for event in all_events:
-        if not event[0]: continue
-        feedback_data = json.loads(event[0])
+        if not event['ai_feedback_json']: 
+            continue
+        feedback_data = json.loads(event['ai_feedback_json'])
         for error in feedback_data.get('error_analysis', []):
             error_type = error.get('error_type')
             if error_type and error_type in types_to_fetch:
                 card_front = error.get('original_phrase', 'N/A')
                 card_back_correction = error.get('correction', 'N/A')
                 card_identifier = (card_front, card_back_correction)
-                if card_identifier in unique_checker: continue
+                if card_identifier in unique_checker: 
+                    continue
                 unique_checker.add(card_identifier)
                 flashcards.append({
                     "front": card_front,
@@ -608,38 +600,36 @@ def get_flashcards_by_types(types_to_fetch):
 
 def get_daily_learning_events(activity_date):
     """查詢特定日期的完整學習事件數據，用於AI總結分析。"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        query = """
+    events = execute_query(
+        """
         SELECT id, question_type, chinese_sentence, user_answer, is_correct,
                response_time, error_category, error_subcategory, ai_feedback_json,
                difficulty, timestamp
         FROM learning_events
         WHERE DATE(timestamp AT TIME ZONE 'UTC' + INTERVAL '8 hours') = %s
         ORDER BY timestamp ASC;
-        """
-        cursor.execute(query, (activity_date,))
-        events = cursor.fetchall()
-    conn.close()
+        """,
+        (activity_date,),
+        fetch='all'
+    )
     
     # 轉換為字典格式，方便AI處理
     events_list = []
     for event in events:
-        event_dict = dict(event)
         # 解析AI反饋JSON
-        if event_dict['ai_feedback_json']:
+        if event['ai_feedback_json']:
             try:
-                event_dict['ai_feedback'] = json.loads(event_dict['ai_feedback_json'])
+                event['ai_feedback'] = json.loads(event['ai_feedback_json'])
             except json.JSONDecodeError:
-                event_dict['ai_feedback'] = None
+                event['ai_feedback'] = None
         else:
-            event_dict['ai_feedback'] = None
+            event['ai_feedback'] = None
         
         # 格式化時間戳
-        if event_dict['timestamp']:
-            event_dict['timestamp'] = event_dict['timestamp'].isoformat()
+        if event['timestamp']:
+            event['timestamp'] = event['timestamp'].isoformat()
             
-        events_list.append(event_dict)
+        events_list.append(event)
     
     return events_list
 
@@ -774,7 +764,7 @@ def add_vocabulary_word(word_data):
             word_data.get('source_reference_id'),
             word_data.get('added_context')
         ))
-        word_id = cursor.fetchone()[0]
+        word_id = cursor.fetchone()['id']
         
         # 如果有例句，一併新增
         if 'examples' in word_data:
@@ -790,86 +780,92 @@ def add_vocabulary_word(word_data):
 
 def get_vocabulary_word_by_id(word_id):
     """根據ID獲取單字完整資訊"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        # 獲取基本單字資訊
-        cursor.execute("SELECT * FROM vocabulary_words WHERE id = %s", (word_id,))
-        word = cursor.fetchone()
+    # 獲取基本單字資訊
+    word = execute_query(
+        "SELECT * FROM vocabulary_words WHERE id = %s", 
+        (word_id,), 
+        fetch='one'
+    )
+    
+    if not word:
+        return None
         
-        if not word:
-            conn.close()
-            return None
-            
-        word_dict = dict(word)
-        
-        # 獲取例句
-        cursor.execute("""
-            SELECT sentence_en, sentence_zh, source 
-            FROM vocabulary_examples 
-            WHERE word_id = %s 
-            ORDER BY created_at
-        """, (word_id,))
-        word_dict['examples'] = [dict(example) for example in cursor.fetchall()]
-        
-    conn.close()
-    return word_dict
+    # 獲取例句
+    examples = execute_query(
+        """
+        SELECT sentence_en, sentence_zh, source 
+        FROM vocabulary_examples 
+        WHERE word_id = %s 
+        ORDER BY created_at
+        """, 
+        (word_id,),
+        fetch='all'
+    )
+    word['examples'] = examples
+    
+    return word
 
 def get_due_vocabulary_words(limit=20):
     """獲取今日需要複習的單字"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        # 使用台灣時區
-        utc_now = datetime.datetime.now(datetime.timezone.utc)
-        taipei_offset = datetime.timedelta(hours=8)
-        taipei_now = utc_now + taipei_offset
-        today_in_taipei = taipei_now.date()
-        
-        cursor.execute("""
-            SELECT * FROM vocabulary_words 
-            WHERE (next_review_at IS NULL OR DATE(next_review_at AT TIME ZONE 'UTC' + INTERVAL '8 hours') <= %s)
-            AND is_archived = FALSE
-            ORDER BY mastery_level ASC, last_reviewed_at ASC NULLS FIRST
-            LIMIT %s
-        """, (today_in_taipei, limit))
-        
-        words = cursor.fetchall()
-    conn.close()
-    return [dict(word) for word in words]
+    # 使用台灣時區
+    utc_now = datetime.datetime.now(datetime.timezone.utc)
+    taipei_offset = datetime.timedelta(hours=8)
+    taipei_now = utc_now + taipei_offset
+    today_in_taipei = taipei_now.date()
+    
+    words = execute_query(
+        """
+        SELECT * FROM vocabulary_words 
+        WHERE (next_review_at IS NULL OR DATE(next_review_at AT TIME ZONE 'UTC' + INTERVAL '8 hours') <= %s)
+        AND is_archived = FALSE
+        ORDER BY mastery_level ASC, last_reviewed_at ASC NULLS FIRST
+        LIMIT %s
+        """, 
+        (today_in_taipei, limit),
+        fetch='all'
+    )
+    
+    return words
 
 def update_vocabulary_mastery(word_id, is_correct, response_time=None, review_type='flashcard'):
     """更新單字掌握度和複習排程"""
+    # 獲取當前狀態
+    result = execute_query(
+        """
+        SELECT mastery_level, consecutive_correct, total_reviews, correct_reviews
+        FROM vocabulary_words WHERE id = %s
+        """, 
+        (word_id,),
+        fetch='one'
+    )
+    
+    if not result:
+        return False
+        
+    current_mastery, consecutive_correct, total_reviews, correct_reviews = (
+        result['mastery_level'], result['consecutive_correct'], 
+        result['total_reviews'], result['correct_reviews']
+    )
+    mastery_before = current_mastery
+    
+    # 計算新的掌握度和間隔
+    if is_correct:
+        new_mastery = min(5.0, current_mastery + 0.3)
+        new_consecutive = consecutive_correct + 1
+        new_correct_reviews = correct_reviews + 1
+        
+        # 計算下次複習間隔（天數）
+        interval_days = max(1, round(2 ** new_mastery))
+    else:
+        new_mastery = max(0.0, current_mastery - 0.4)
+        new_consecutive = 0
+        new_correct_reviews = correct_reviews
+        interval_days = 1  # 明天再複習
+    
+    next_review_date = datetime.date.today() + datetime.timedelta(days=interval_days)
+    
     conn = get_db_connection()
     with conn.cursor() as cursor:
-        # 獲取當前狀態
-        cursor.execute("""
-            SELECT mastery_level, consecutive_correct, total_reviews, correct_reviews
-            FROM vocabulary_words WHERE id = %s
-        """, (word_id,))
-        
-        result = cursor.fetchone()
-        if not result:
-            conn.close()
-            return False
-            
-        current_mastery, consecutive_correct, total_reviews, correct_reviews = result
-        mastery_before = current_mastery
-        
-        # 計算新的掌握度和間隔
-        if is_correct:
-            new_mastery = min(5.0, current_mastery + 0.3)
-            new_consecutive = consecutive_correct + 1
-            new_correct_reviews = correct_reviews + 1
-            
-            # 計算下次複習間隔（天數）
-            interval_days = max(1, round(2 ** new_mastery))
-        else:
-            new_mastery = max(0.0, current_mastery - 0.4)
-            new_consecutive = 0
-            new_correct_reviews = correct_reviews
-            interval_days = 1  # 明天再複習
-        
-        next_review_date = datetime.date.today() + datetime.timedelta(days=interval_days)
-        
         # 更新單字狀態
         cursor.execute("""
             UPDATE vocabulary_words 
@@ -900,34 +896,42 @@ def update_vocabulary_mastery(word_id, is_correct, response_time=None, review_ty
 
 def get_vocabulary_statistics():
     """獲取單字庫統計資訊"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        # 總單字數
-        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE is_archived = FALSE")
-        total_words = cursor.fetchone()[0]
-        
-        # 已掌握單字（掌握度 >= 4.0）
-        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE mastery_level >= 4.0 AND is_archived = FALSE")
-        mastered_words = cursor.fetchone()[0]
-        
-        # 學習中單字（0 < 掌握度 < 4.0）
-        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE mastery_level > 0 AND mastery_level < 4.0 AND is_archived = FALSE")
-        learning_words = cursor.fetchone()[0]
-        
-        # 新單字（掌握度 = 0）
-        cursor.execute("SELECT COUNT(*) FROM vocabulary_words WHERE mastery_level = 0 AND is_archived = FALSE")
-        new_words = cursor.fetchone()[0]
-        
-        # 今日複習數
-        today = datetime.date.today()
-        cursor.execute("""
-            SELECT COUNT(*) FROM vocabulary_words 
-            WHERE DATE(next_review_at AT TIME ZONE 'UTC' + INTERVAL '8 hours') <= %s 
-            AND is_archived = FALSE
-        """, (today,))
-        due_today = cursor.fetchone()[0]
-        
-    conn.close()
+    # 總單字數
+    total_words = execute_query(
+        "SELECT COUNT(*) as count FROM vocabulary_words WHERE is_archived = FALSE",
+        fetch='one'
+    )['count']
+    
+    # 已掌握單字（掌握度 >= 4.0）
+    mastered_words = execute_query(
+        "SELECT COUNT(*) as count FROM vocabulary_words WHERE mastery_level >= 4.0 AND is_archived = FALSE",
+        fetch='one'
+    )['count']
+    
+    # 學習中單字（0 < 掌握度 < 4.0）
+    learning_words = execute_query(
+        "SELECT COUNT(*) as count FROM vocabulary_words WHERE mastery_level > 0 AND mastery_level < 4.0 AND is_archived = FALSE",
+        fetch='one'
+    )['count']
+    
+    # 新單字（掌握度 = 0）
+    new_words = execute_query(
+        "SELECT COUNT(*) as count FROM vocabulary_words WHERE mastery_level = 0 AND is_archived = FALSE",
+        fetch='one'
+    )['count']
+    
+    # 今日複習數
+    today = datetime.date.today()
+    due_today = execute_query(
+        """
+        SELECT COUNT(*) as count FROM vocabulary_words 
+        WHERE DATE(next_review_at AT TIME ZONE 'UTC' + INTERVAL '8 hours') <= %s 
+        AND is_archived = FALSE
+        """, 
+        (today,),
+        fetch='one'
+    )['count']
+    
     return {
         'total_words': total_words,
         'mastered_words': mastered_words,
@@ -938,21 +942,21 @@ def get_vocabulary_statistics():
 
 def search_vocabulary_words(query, limit=50):
     """搜尋單字"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        cursor.execute("""
-            SELECT * FROM vocabulary_words 
-            WHERE (word ILIKE %s OR definition_zh ILIKE %s) 
-            AND is_archived = FALSE
-            ORDER BY 
-                CASE WHEN word ILIKE %s THEN 1 ELSE 2 END,
-                mastery_level ASC
-            LIMIT %s
-        """, (f'%{query}%', f'%{query}%', f'{query}%', limit))
-        
-        words = cursor.fetchall()
-    conn.close()
-    return [dict(word) for word in words]
+    words = execute_query(
+        """
+        SELECT * FROM vocabulary_words 
+        WHERE (word ILIKE %s OR definition_zh ILIKE %s) 
+        AND is_archived = FALSE
+        ORDER BY 
+            CASE WHEN word ILIKE %s THEN 1 ELSE 2 END,
+            mastery_level ASC
+        LIMIT %s
+        """, 
+        (f'%{query}%', f'%{query}%', f'{query}%', limit),
+        fetch='all'
+    )
+    
+    return words
 
 # 在原有的 init_db() 函式末尾加入
 def enhanced_init_db():
@@ -966,221 +970,192 @@ def enhanced_init_db():
 
 def create_user(username, email, password_hash, display_name=None, native_language='中文', target_language='英文', learning_level='初級'):
     """創建新用戶"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            INSERT INTO users (username, email, password_hash, display_name, native_language, target_language, learning_level)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            RETURNING id, username, email, display_name, native_language, target_language, learning_level, 
-                     total_learning_time, knowledge_points_count, created_at, last_login_at
-        """, (username, email, password_hash, display_name, native_language, target_language, learning_level))
-        
-        user_data = cursor.fetchone()
-        conn.commit()
-    conn.close()
+    user_data = execute_query(
+        """
+        INSERT INTO users (username, email, password_hash, display_name, native_language, target_language, learning_level)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id, username, email, display_name, native_language, target_language, learning_level, 
+                 total_learning_time, knowledge_points_count, created_at, last_login_at
+        """, 
+        (username, email, password_hash, display_name, native_language, target_language, learning_level),
+        fetch='one'
+    )
     
     if user_data:
         return {
-            'id': user_data[0],
-            'username': user_data[1],
-            'email': user_data[2],
-            'display_name': user_data[3],
-            'native_language': user_data[4],
-            'target_language': user_data[5],
-            'learning_level': user_data[6],
-            'total_learning_time': user_data[7],
-            'knowledge_points_count': user_data[8],
-            'created_at': user_data[9].isoformat() if user_data[9] else None,
-            'last_login_at': user_data[10].isoformat() if user_data[10] else None
+            'id': user_data['id'],
+            'username': user_data['username'],
+            'email': user_data['email'],
+            'display_name': user_data['display_name'],
+            'native_language': user_data['native_language'],
+            'target_language': user_data['target_language'],
+            'learning_level': user_data['learning_level'],
+            'total_learning_time': user_data['total_learning_time'],
+            'knowledge_points_count': user_data['knowledge_points_count'],
+            'created_at': user_data['created_at'].isoformat() if user_data['created_at'] else None,
+            'last_login_at': user_data['last_login_at'].isoformat() if user_data['last_login_at'] else None
         }
     return None
 
 def get_user_by_email(email):
     """根據email獲取用戶"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            SELECT id, username, email, password_hash, display_name, native_language, target_language, 
-                   learning_level, total_learning_time, knowledge_points_count, created_at, last_login_at, is_active
-            FROM users WHERE email = %s AND is_active = TRUE
-        """, (email,))
-        
-        user_data = cursor.fetchone()
-    conn.close()
+    user_data = execute_query(
+        """
+        SELECT id, username, email, password_hash, display_name, native_language, target_language, 
+               learning_level, total_learning_time, knowledge_points_count, created_at, last_login_at, is_active
+        FROM users WHERE email = %s AND is_active = TRUE
+        """, 
+        (email,),
+        fetch='one'
+    )
     
     if user_data:
         return {
-            'id': user_data[0],
-            'username': user_data[1],
-            'email': user_data[2],
-            'password_hash': user_data[3],
-            'display_name': user_data[4],
-            'native_language': user_data[5],
-            'target_language': user_data[6],
-            'learning_level': user_data[7],
-            'total_learning_time': user_data[8],
-            'knowledge_points_count': user_data[9],
-            'created_at': user_data[10].isoformat() if user_data[10] else None,
-            'last_login_at': user_data[11].isoformat() if user_data[11] else None,
-            'is_active': user_data[12]
+            'id': user_data['id'],
+            'username': user_data['username'],
+            'email': user_data['email'],
+            'password_hash': user_data['password_hash'],
+            'display_name': user_data['display_name'],
+            'native_language': user_data['native_language'],
+            'target_language': user_data['target_language'],
+            'learning_level': user_data['learning_level'],
+            'total_learning_time': user_data['total_learning_time'],
+            'knowledge_points_count': user_data['knowledge_points_count'],
+            'created_at': user_data['created_at'].isoformat() if user_data['created_at'] else None,
+            'last_login_at': user_data['last_login_at'].isoformat() if user_data['last_login_at'] else None,
+            'is_active': user_data['is_active']
         }
     return None
 
 def get_user_by_id(user_id):
     """根據ID獲取用戶"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            SELECT id, username, email, display_name, native_language, target_language, 
-                   learning_level, total_learning_time, knowledge_points_count, created_at, last_login_at
-            FROM users WHERE id = %s AND is_active = TRUE
-        """, (user_id,))
-        
-        user_data = cursor.fetchone()
-    conn.close()
+    user_data = execute_query(
+        """
+        SELECT id, username, email, display_name, native_language, target_language, 
+               learning_level, total_learning_time, knowledge_points_count, created_at, last_login_at
+        FROM users WHERE id = %s AND is_active = TRUE
+        """, 
+        (user_id,),
+        fetch='one'
+    )
     
     if user_data:
         return {
-            'id': user_data[0],
-            'username': user_data[1],
-            'email': user_data[2],
-            'display_name': user_data[3],
-            'native_language': user_data[4],
-            'target_language': user_data[5],
-            'learning_level': user_data[6],
-            'total_learning_time': user_data[7],
-            'knowledge_points_count': user_data[8],
-            'created_at': user_data[9].isoformat() if user_data[9] else None,
-            'last_login_at': user_data[10].isoformat() if user_data[10] else None
+            'id': user_data['id'],
+            'username': user_data['username'],
+            'email': user_data['email'],
+            'display_name': user_data['display_name'],
+            'native_language': user_data['native_language'],
+            'target_language': user_data['target_language'],
+            'learning_level': user_data['learning_level'],
+            'total_learning_time': user_data['total_learning_time'],
+            'knowledge_points_count': user_data['knowledge_points_count'],
+            'created_at': user_data['created_at'].isoformat() if user_data['created_at'] else None,
+            'last_login_at': user_data['last_login_at'].isoformat() if user_data['last_login_at'] else None
         }
     return None
 
 def update_user_last_login(user_id):
     """更新用戶最後登入時間"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            UPDATE users SET last_login_at = NOW() WHERE id = %s
-        """, (user_id,))
-        conn.commit()
-    conn.close()
+    execute_query(
+        "UPDATE users SET last_login_at = NOW() WHERE id = %s",
+        (user_id,)
+    )
 
 def store_refresh_token(user_id, token_hash, expires_at):
     """儲存刷新令牌"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
-            VALUES (%s, %s, %s)
-            RETURNING id
-        """, (user_id, token_hash, expires_at))
-        
-        token_id = cursor.fetchone()[0]
-        conn.commit()
-    conn.close()
+    token_id = execute_query(
+        """
+        INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+        VALUES (%s, %s, %s)
+        RETURNING id
+        """,
+        (user_id, token_hash, expires_at),
+        fetch='one'
+    )['id']
+    
     return token_id
 
 def get_refresh_token(token_hash):
     """獲取刷新令牌"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            SELECT rt.id, rt.user_id, rt.expires_at, rt.is_revoked, u.is_active
-            FROM refresh_tokens rt
-            JOIN users u ON rt.user_id = u.id
-            WHERE rt.token_hash = %s
-        """, (token_hash,))
-        
-        token_data = cursor.fetchone()
-    conn.close()
+    token_data = execute_query(
+        """
+        SELECT rt.id, rt.user_id, rt.expires_at, rt.is_revoked, u.is_active
+        FROM refresh_tokens rt
+        JOIN users u ON rt.user_id = u.id
+        WHERE rt.token_hash = %s
+        """,
+        (token_hash,),
+        fetch='one'
+    )
     
     if token_data:
         return {
-            'id': token_data[0],
-            'user_id': token_data[1],
-            'expires_at': token_data[2],
-            'is_revoked': token_data[3],
-            'user_is_active': token_data[4]
+            'id': token_data['id'],
+            'user_id': token_data['user_id'],
+            'expires_at': token_data['expires_at'],
+            'is_revoked': token_data['is_revoked'],
+            'user_is_active': token_data['is_active']
         }
     return None
 
 def revoke_refresh_token(token_hash):
     """撤銷刷新令牌"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            UPDATE refresh_tokens SET is_revoked = TRUE WHERE token_hash = %s
-        """, (token_hash,))
-        updated_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    updated_rows = execute_query(
+        "UPDATE refresh_tokens SET is_revoked = TRUE WHERE token_hash = %s",
+        (token_hash,)
+    )
     return updated_rows > 0
 
 def cleanup_expired_tokens():
     """清理過期的刷新令牌"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute("""
-            DELETE FROM refresh_tokens WHERE expires_at < NOW() OR is_revoked = TRUE
-        """, )
-        deleted_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    deleted_rows = execute_query(
+        "DELETE FROM refresh_tokens WHERE expires_at < NOW() OR is_revoked = TRUE"
+    )
     return deleted_rows
 
 # 在 app/services/database.py 中新增以下缺少的函式
 
 def get_vocabulary_word_by_word(word):
     """根據單字文本獲取單字資訊（用於檢查重複）"""
-    conn = get_db_connection()
-    with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cursor:
-        cursor.execute("SELECT * FROM vocabulary_words WHERE word = %s", (word.lower(),))
-        word_data = cursor.fetchone()
-    conn.close()
-    return dict(word_data) if word_data else None
+    word_data = execute_query(
+        "SELECT * FROM vocabulary_words WHERE word = %s", 
+        (word.lower(),),
+        fetch='one'
+    )
+    return word_data
 
 def update_vocabulary_word(word_id, update_data):
     """更新單字資訊"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        allowed_fields = [
-            'pronunciation_ipa', 'part_of_speech', 'definition_zh', 'definition_en',
-            'difficulty_level', 'word_frequency_rank', 'added_context'
-        ]
-        
-        update_fields = []
-        update_values = []
-        
-        for key, value in update_data.items():
-            if key in allowed_fields:
-                update_fields.append(f"{key} = %s")
-                update_values.append(value)
-        
-        if not update_fields:
-            conn.close()
-            return False
-        
-        update_fields.append("updated_at = %s")
-        update_values.append(datetime.datetime.now(datetime.timezone.utc))
-        update_values.append(word_id)
-        
-        query = f"UPDATE vocabulary_words SET {', '.join(update_fields)} WHERE id = %s"
-        cursor.execute(query, tuple(update_values))
-        updated_rows = cursor.rowcount
-        conn.commit()
+    allowed_fields = [
+        'pronunciation_ipa', 'part_of_speech', 'definition_zh', 'definition_en',
+        'difficulty_level', 'word_frequency_rank', 'added_context'
+    ]
     
-    conn.close()
+    update_fields = []
+    update_values = []
+    
+    for key, value in update_data.items():
+        if key in allowed_fields:
+            update_fields.append(f"{key} = %s")
+            update_values.append(value)
+    
+    if not update_fields:
+        return False
+    
+    update_fields.append("updated_at = %s")
+    update_values.append(datetime.datetime.now(datetime.timezone.utc))
+    update_values.append(word_id)
+    
+    query = f"UPDATE vocabulary_words SET {', '.join(update_fields)} WHERE id = %s"
+    updated_rows = execute_query(query, tuple(update_values))
+    
     return updated_rows > 0
 
 def archive_vocabulary_word(word_id):
     """歸檔單字"""
-    conn = get_db_connection()
-    with conn.cursor() as cursor:
-        cursor.execute(
-            "UPDATE vocabulary_words SET is_archived = TRUE, updated_at = %s WHERE id = %s",
-            (datetime.datetime.now(datetime.timezone.utc), word_id)
-        )
-        updated_rows = cursor.rowcount
-        conn.commit()
-    conn.close()
+    updated_rows = execute_query(
+        "UPDATE vocabulary_words SET is_archived = TRUE, updated_at = %s WHERE id = %s",
+        (datetime.datetime.now(datetime.timezone.utc), word_id)
+    )
     return updated_rows > 0
