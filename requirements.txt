@@ -6,7 +6,7 @@ flask==2.3.3
 gunicorn==21.2.0
 
 # === 資料庫連接 ===
-psycopg2-binary==2.9.9
+psycopg2-binary==2.9.5
 
 # === 用戶認證與安全 ===
 flask-jwt-extended==4.5.3

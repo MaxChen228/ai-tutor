@@ -3,8 +3,21 @@
 import os
 import datetime
 import json
-import psycopg2
-import psycopg2.extras
+
+# 使用適配器以支援 psycopg2 和 psycopg3
+try:
+    from .psycopg_adapter import psycopg2_compat as psycopg2, get_db_connection_with_adapter, get_psycopg_info
+    import psycopg2.extras
+    print(f"✅ 資料庫適配器載入成功: {get_psycopg_info()}")
+except ImportError:
+    # 回退到原始 psycopg2
+    import psycopg2
+    import psycopg2.extras
+    print("⚠️ 使用原始 psycopg2（適配器不可用）")
+    
+    def get_db_connection_with_adapter():
+        database_url = os.environ.get('DATABASE_URL')
+        return psycopg2.connect(database_url)
 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
