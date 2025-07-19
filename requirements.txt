@@ -16,9 +16,9 @@ bcrypt==4.0.1
 python-dotenv==1.0.0
 
 # === 知識點向量化功能（核心功能）===
+numpy==2.0.2
 sentence-transformers==2.2.2
-scikit-learn==1.4.2
-numpy==1.26.4
+scikit-learn==1.5.2
 
 # === 可選功能 ===
 # 如需要 AI 對話功能，取消註解以下行：
