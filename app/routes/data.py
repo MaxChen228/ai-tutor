@@ -1,10 +1,19 @@
 # app/routes/data.py
 
 from flask import Blueprint, request, jsonify
+from flask_jwt_extended import get_jwt_identity, verify_jwt_in_request
 from app.services import database as db
 from app.services import ai_service as ai
 import datetime
 import json
+
+def get_current_user_id():
+    """獲取當前用戶ID，支持訪客模式"""
+    try:
+        verify_jwt_in_request(optional=True)
+        return get_jwt_identity()
+    except:
+        return None
 
 data_bp = Blueprint('data_bp', __name__)
 
@@ -242,6 +251,10 @@ def merge_errors_endpoint():
 @data_bp.route("/knowledge_points/finalize", methods=['POST'])
 def finalize_knowledge_points_endpoint():
     """接收前端整理好的錯誤分析陣列，並將它們作為正式的知識點存入資料庫。"""
+    # 獲取當前用戶ID（支持訪客模式）
+    user_id = get_current_user_id()
+    print(f"[API] 用戶ID: {user_id if user_id else '訪客模式'}")
+    
     data = request.get_json()
     
     if not isinstance(data, dict):
@@ -254,6 +267,10 @@ def finalize_knowledge_points_endpoint():
     if not isinstance(final_errors, list):
         return jsonify({"error": "錯誤列表格式不正確。"}), 400
 
+    # 訪客模式不能保存知識點
+    if not user_id:
+        return jsonify({"error": "訪客模式無法保存知識點，請先登入。"}), 403
+
     try:
         print(f"[API] 收到請求：儲存 {len(final_errors)} 個最終確認的知識點")
         
@@ -263,7 +280,7 @@ def finalize_knowledge_points_endpoint():
                 "error_analysis": [error_data]
             }
             
-            db.add_mistake(question_data, user_answer, mock_feedback_data)
+            db.add_mistake(question_data, user_answer, mock_feedback_data, user_id=user_id)
             print(f"  - 已儲存知識點: {error_data.get('key_point_summary', 'N/A')}")
         
         return jsonify({
