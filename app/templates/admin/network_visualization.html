@@ -1,0 +1,282 @@
+{% extends "admin/base.html" %}
+
+{% block extra_head %}
+<!-- D3.js -->
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+#networkGraph {
+    width: 100%;
+    height: 600px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    background-color: #fafafa;
+}
+
+.node {
+    cursor: pointer;
+    stroke: #fff;
+    stroke-width: 2px;
+}
+
+.node:hover {
+    stroke-width: 4px;
+}
+
+.link {
+    stroke: #999;
+    stroke-opacity: 0.6;
+}
+
+.node-label {
+    font-family: Arial, sans-serif;
+    font-size: 12px;
+    pointer-events: none;
+    text-anchor: middle;
+    dominant-baseline: middle;
+}
+
+.tooltip {
+    position: absolute;
+    padding: 10px;
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    border-radius: 5px;
+    pointer-events: none;
+    font-size: 12px;
+    z-index: 1000;
+}
+
+.control-panel {
+    background: #f8f9fa;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.legend {
+    background: white;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 15px;
+    margin-top: 10px;
+}
+
+.legend-item {
+    display: flex;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.legend-color {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    margin-right: 10px;
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1 class="h3 mb-4">
+            <i class="fas fa-project-diagram text-primary me-2"></i>
+            知識點網絡視覺化
+        </h1>
+    </div>
+</div>
+
+<!-- 控制面板 -->
+<div class="control-panel">
+    <div class="row g-3 align-items-end">
+        <div class="col-md-2">
+            <label for="nodeLimit" class="form-label">節點數量</label>
+            <select id="nodeLimit" class="form-select form-select-sm">
+                <option value="30">30 個節點</option>
+                <option value="50" selected>50 個節點</option>
+                <option value="100">100 個節點</option>
+                <option value="200">200 個節點</option>
+            </select>
+        </div>
+        
+        <div class="col-md-2">
+            <label for="similarityThreshold" class="form-label">相似度閾值</label>
+            <input type="range" id="similarityThreshold" class="form-range" 
+                   min="0.6" max="0.95" step="0.05" value="0.8">
+            <div class="d-flex justify-content-between">
+                <small>0.6</small>
+                <small id="thresholdDisplay">0.8</small>
+                <small>0.95</small>
+            </div>
+        </div>
+        
+        <div class="col-md-2">
+            <label for="layoutType" class="form-label">布局類型</label>
+            <select id="layoutType" class="form-select form-select-sm">
+                <option value="force">力導向</option>
+                <option value="circular">圓形</option>
+                <option value="tree">樹狀</option>
+            </select>
+        </div>
+        
+        <div class="col-md-2">
+            <label for="colorBy" class="form-label">節點著色</label>
+            <select id="colorBy" class="form-select form-select-sm">
+                <option value="category" selected>按分類</option>
+                <option value="degree">按連接數</option>
+                <option value="cluster">按聚類</option>
+            </select>
+        </div>
+        
+        <div class="col-md-2">
+            <button class="btn btn-primary btn-sm w-100" onclick="updateNetwork()">
+                <i class="fas fa-sync-alt me-1"></i>更新圖表
+            </button>
+        </div>
+        
+        <div class="col-md-2">
+            <button class="btn btn-success btn-sm w-100" onclick="exportNetwork()">
+                <i class="fas fa-download me-1"></i>匯出圖片
+            </button>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <!-- 主要網絡圖 -->
+    <div class="col-lg-9">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-sitemap text-primary me-2"></i>
+                    知識點關係網絡
+                </h5>
+                <div class="btn-group" role="group">
+                    <button class="btn btn-sm btn-outline-secondary" onclick="zoomIn()">
+                        <i class="fas fa-search-plus"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="zoomOut()">
+                        <i class="fas fa-search-minus"></i>
+                    </button>
+                    <button class="btn btn-sm btn-outline-secondary" onclick="resetZoom()">
+                        <i class="fas fa-expand-arrows-alt"></i>
+                    </button>
+                </div>
+            </div>
+            <div class="card-body p-0">
+                <div id="networkGraph"></div>
+                <div id="loadingSpinner" class="text-center py-5" style="display: none;">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">載入中...</span>
+                    </div>
+                    <div class="mt-2">正在載入網絡資料...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- 側邊資訊面板 -->
+    <div class="col-lg-3">
+        <!-- 網絡統計 -->
+        <div class="card mb-3">
+            <div class="card-header">
+                <h6 class="card-title mb-0">
+                    <i class="fas fa-chart-bar text-info me-2"></i>
+                    網絡統計
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="row text-center">
+                    <div class="col-6">
+                        <div class="fs-4 fw-bold text-primary" id="nodeCount">0</div>
+                        <small class="text-muted">節點</small>
+                    </div>
+                    <div class="col-6">
+                        <div class="fs-4 fw-bold text-success" id="linkCount">0</div>
+                        <small class="text-muted">連結</small>
+                    </div>
+                </div>
+                <hr>
+                <div class="row text-center">
+                    <div class="col-6">
+                        <div class="fs-6 fw-bold" id="avgDegree">0</div>
+                        <small class="text-muted">平均連接數</small>
+                    </div>
+                    <div class="col-6">
+                        <div class="fs-6 fw-bold" id="maxDegree">0</div>
+                        <small class="text-muted">最大連接數</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 節點詳情 -->
+        <div class="card mb-3" id="nodeDetailsCard" style="display: none;">
+            <div class="card-header">
+                <h6 class="card-title mb-0">
+                    <i class="fas fa-info-circle text-warning me-2"></i>
+                    節點詳情
+                </h6>
+            </div>
+            <div class="card-body" id="nodeDetails">
+                <!-- 動態內容 -->
+            </div>
+        </div>
+        
+        <!-- 搜尋面板 -->
+        <div class="card mb-3">
+            <div class="card-header">
+                <h6 class="card-title mb-0">
+                    <i class="fas fa-search text-secondary me-2"></i>
+                    節點搜尋
+                </h6>
+            </div>
+            <div class="card-body">
+                <div class="input-group input-group-sm">
+                    <input type="text" class="form-control" id="nodeSearch" 
+                           placeholder="搜尋知識點...">
+                    <button class="btn btn-outline-secondary" type="button" onclick="searchNode()">
+                        <i class="fas fa-search"></i>
+                    </button>
+                </div>
+                <div id="searchResults" class="mt-2"></div>
+            </div>
+        </div>
+        
+        <!-- 圖例 -->
+        <div class="legend">
+            <h6 class="fw-bold mb-3">
+                <i class="fas fa-palette me-2"></i>圖例
+            </h6>
+            <div id="legendContent">
+                <!-- 動態生成圖例 -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 工具提示 -->
+<div id="tooltip" class="tooltip" style="display: none;"></div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script src="{{ url_for('static', filename='js/network-visualization.js') }}"></script>
+<script>
+// 頁面載入完成後初始化網絡圖
+document.addEventListener('DOMContentLoaded', function() {
+    initializeNetwork();
+});
+
+// 相似度閾值滑塊更新
+document.getElementById('similarityThreshold').addEventListener('input', function() {
+    document.getElementById('thresholdDisplay').textContent = this.value;
+});
+
+// 搜尋功能
+document.getElementById('nodeSearch').addEventListener('keypress', function(e) {
+    if (e.key === 'Enter') {
+        searchNode();
+    }
+});
+</script>
+{% endblock %}

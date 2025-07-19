@@ -1,0 +1,237 @@
+{% extends "admin/base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <h1 class="h3 mb-4">
+            <i class="fas fa-tachometer-alt text-primary me-2"></i>
+            知識點網絡統計儀表板
+        </h1>
+    </div>
+</div>
+
+<div class="row g-4 mb-5">
+    <!-- 統計卡片 -->
+    <div class="col-xl-3 col-md-6">
+        <div class="card bg-primary text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <div class="fs-6 fw-bold">已向量化知識點</div>
+                        <div class="fs-2 fw-bold">{{ stats.points_with_vectors or 0 }}</div>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-check-circle fa-2x opacity-75"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6">
+        <div class="card bg-warning text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <div class="fs-6 fw-bold">待處理知識點</div>
+                        <div class="fs-2 fw-bold">{{ stats.points_without_vectors or 0 }}</div>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-clock fa-2x opacity-75"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6">
+        <div class="card bg-success text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <div class="fs-6 fw-bold">活躍關聯</div>
+                        <div class="fs-2 fw-bold">{{ stats.active_links or 0 }}</div>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-link fa-2x opacity-75"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="col-xl-3 col-md-6">
+        <div class="card bg-info text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between">
+                    <div>
+                        <div class="fs-6 fw-bold">平均相似度</div>
+                        <div class="fs-2 fw-bold">
+                            {% if stats.avg_similarity_score %}
+                                {{ "%.2f"|format(stats.avg_similarity_score) }}
+                            {% else %}
+                                --
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="align-self-center">
+                        <i class="fas fa-chart-line fa-2x opacity-75"></i>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <!-- 處理進度 -->
+    <div class="col-lg-8">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-tasks text-primary me-2"></i>
+                    向量化處理進度
+                </h5>
+                <button class="btn btn-sm btn-outline-primary" onclick="refreshStats()">
+                    <i class="fas fa-sync-alt me-1"></i>重新整理
+                </button>
+            </div>
+            <div class="card-body">
+                {% set total_points = (stats.points_with_vectors or 0) + (stats.points_without_vectors or 0) %}
+                {% if total_points > 0 %}
+                    {% set progress_percentage = ((stats.points_with_vectors or 0) / total_points * 100) %}
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between mb-2">
+                            <span>完成進度</span>
+                            <span>{{ "%.1f"|format(progress_percentage) }}%</span>
+                        </div>
+                        <div class="progress" style="height: 20px;">
+                            <div class="progress-bar bg-success" role="progressbar" 
+                                 style="width: {{ progress_percentage }}%" 
+                                 aria-valuenow="{{ progress_percentage }}" 
+                                 aria-valuemin="0" aria-valuemax="100">
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div class="row text-center">
+                        <div class="col-4">
+                            <div class="fs-4 fw-bold text-primary">{{ total_points }}</div>
+                            <div class="text-muted">總知識點</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="fs-4 fw-bold text-success">{{ stats.points_with_vectors or 0 }}</div>
+                            <div class="text-muted">已完成</div>
+                        </div>
+                        <div class="col-4">
+                            <div class="fs-4 fw-bold text-warning">{{ stats.points_without_vectors or 0 }}</div>
+                            <div class="text-muted">待處理</div>
+                        </div>
+                    </div>
+                {% else %}
+                    <div class="text-center text-muted py-5">
+                        <i class="fas fa-database fa-3x mb-3"></i>
+                        <p>尚無知識點資料</p>
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+
+    <!-- 快速操作 -->
+    <div class="col-lg-4">
+        <div class="card h-100">
+            <div class="card-header">
+                <h5 class="card-title mb-0">
+                    <i class="fas fa-bolt text-warning me-2"></i>
+                    快速操作
+                </h5>
+            </div>
+            <div class="card-body">
+                <div class="d-grid gap-3">
+                    <a href="{{ url_for('admin_bp.batch_processing') }}" class="btn btn-primary">
+                        <i class="fas fa-cogs me-2"></i>
+                        批次處理向量
+                    </a>
+                    
+                    <a href="{{ url_for('admin_bp.network_visualization') }}" class="btn btn-success">
+                        <i class="fas fa-project-diagram me-2"></i>
+                        查看網絡圖
+                    </a>
+                    
+                    <a href="{{ url_for('admin_bp.knowledge_points_list') }}" class="btn btn-info">
+                        <i class="fas fa-list me-2"></i>
+                        管理知識點
+                    </a>
+                    
+                    <button class="btn btn-outline-danger" onclick="cleanupLinks()">
+                        <i class="fas fa-broom me-2"></i>
+                        清理無效關聯
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 最近更新資訊 -->
+{% if stats.last_embedding_update %}
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="d-flex align-items-center">
+                    <i class="fas fa-info-circle text-info me-3 fa-lg"></i>
+                    <div>
+                        <strong>最後向量更新時間：</strong>
+                        <span class="text-muted">{{ stats.last_embedding_update }}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function refreshStats() {
+    window.location.reload();
+}
+
+function cleanupLinks() {
+    if (confirm('確定要清理無效的知識點關聯嗎？此操作無法復原。')) {
+        fetch('/api/embedding/cleanup_links', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('jwt_token'),
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(data.message);
+                window.location.reload();
+            } else {
+                alert('清理失敗: ' + (data.error || '未知錯誤'));
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('清理時發生錯誤');
+        });
+    }
+}
+
+// 自動重新整理（每30秒）
+setInterval(function() {
+    const lastUpdate = new Date(document.lastModified);
+    const now = new Date();
+    if (now - lastUpdate > 30000) {
+        refreshStats();
+    }
+}, 30000);
+</script>
+{% endblock %}

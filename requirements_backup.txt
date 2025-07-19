@@ -1,0 +1,27 @@
+# 備用方案：如果 psycopg2-binary 仍有問題，使用以下版本
+
+# === 核心 Web 框架與部署 ===
+flask==2.3.3
+gunicorn==21.2.0
+
+# === 資料庫連接（備用方案）===
+# 方案1: 使用最新版本
+# psycopg2-binary>=2.9.9
+
+# 方案2: 使用 psycopg (新版本，支援 Python 3.13)
+# psycopg[binary]==3.1.18
+
+# 方案3: 固定較老的穩定版本
+# psycopg2-binary==2.9.5
+
+# === 用戶認證與安全 ===
+flask-jwt-extended==4.5.3
+bcrypt==4.0.1
+
+# === 環境變數管理 ===
+python-dotenv==1.0.0
+
+# === 知識點向量化功能（核心功能）===
+numpy==2.0.2
+sentence-transformers==2.2.2
+scikit-learn==1.5.2

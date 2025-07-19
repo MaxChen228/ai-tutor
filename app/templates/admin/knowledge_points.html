@@ -1,0 +1,372 @@
+{% extends "admin/base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h1 class="h3 mb-0">
+                <i class="fas fa-list text-primary me-2"></i>
+                知識點管理
+            </h1>
+            <div class="d-flex gap-2">
+                <button class="btn btn-success" onclick="batchProcess()">
+                    <i class="fas fa-magic me-1"></i>批次生成向量
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 篩選控制 -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <form method="GET" class="row g-3 align-items-end">
+                    <div class="col-md-3">
+                        <label for="has_vector" class="form-label">向量狀態</label>
+                        <select name="has_vector" id="has_vector" class="form-select">
+                            <option value="all" {% if has_vector == 'all' %}selected{% endif %}>全部</option>
+                            <option value="yes" {% if has_vector == 'yes' %}selected{% endif %}>已有向量</option>
+                            <option value="no" {% if has_vector == 'no' %}selected{% endif %}>無向量</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label for="per_page" class="form-label">每頁顯示</label>
+                        <select name="per_page" id="per_page" class="form-select">
+                            <option value="20" {% if per_page == 20 %}selected{% endif %}>20</option>
+                            <option value="50" {% if per_page == 50 %}selected{% endif %}>50</option>
+                            <option value="100" {% if per_page == 100 %}selected{% endif %}>100</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-filter me-1"></i>篩選
+                        </button>
+                        <a href="{{ url_for('admin_bp.knowledge_points_list') }}" class="btn btn-outline-secondary">
+                            <i class="fas fa-times me-1"></i>清除
+                        </a>
+                    </div>
+                    <div class="col-md-3 text-end">
+                        <small class="text-muted">
+                            顯示第 {{ (page-1) * per_page + 1 }} - {{ page * per_page if page * per_page < total else total }} 項，
+                            共 {{ total }} 項
+                        </small>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 知識點列表 -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                {% if knowledge_points %}
+                <div class="table-responsive">
+                    <table class="table table-striped table-hover">
+                        <thead class="table-dark">
+                            <tr>
+                                <th>ID</th>
+                                <th>正確用法</th>
+                                <th>重點摘要</th>
+                                <th>分類</th>
+                                <th>向量狀態</th>
+                                <th>建立時間</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for point in knowledge_points %}
+                            <tr>
+                                <td>
+                                    <span class="badge bg-secondary">{{ point.id }}</span>
+                                </td>
+                                <td>
+                                    <div class="text-truncate" style="max-width: 200px;" title="{{ point.correct_phrase }}">
+                                        {{ point.correct_phrase or '無資料' }}
+                                    </div>
+                                </td>
+                                <td>
+                                    <div class="text-truncate" style="max-width: 250px;" title="{{ point.key_point_summary }}">
+                                        {{ point.key_point_summary or '無摘要' }}
+                                    </div>
+                                </td>
+                                <td>
+                                    <span class="badge bg-info">{{ point.category or '未分類' }}</span>
+                                    {% if point.subcategory %}
+                                    <br><small class="text-muted">{{ point.subcategory }}</small>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if point.has_vector %}
+                                        <span class="badge bg-success">
+                                            <i class="fas fa-check me-1"></i>已生成
+                                        </span>
+                                        {% if point.embedding_updated_at %}
+                                        <br><small class="text-muted">
+                                            {{ point.embedding_updated_at[:10] }}
+                                        </small>
+                                        {% endif %}
+                                    {% else %}
+                                        <span class="badge bg-warning">
+                                            <i class="fas fa-clock me-1"></i>待處理
+                                        </span>
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <small class="text-muted">
+                                        {{ point.created_at[:10] if point.created_at else '未知' }}
+                                    </small>
+                                </td>
+                                <td>
+                                    <div class="btn-group" role="group">
+                                        <button class="btn btn-sm btn-outline-primary" 
+                                                onclick="viewDetails({{ point.id }})" 
+                                                title="查看詳情">
+                                            <i class="fas fa-eye"></i>
+                                        </button>
+                                        {% if point.has_vector %}
+                                        <button class="btn btn-sm btn-outline-info" 
+                                                onclick="showSimilar({{ point.id }})" 
+                                                title="查看相關">
+                                            <i class="fas fa-link"></i>
+                                        </button>
+                                        {% endif %}
+                                        <button class="btn btn-sm btn-outline-warning" 
+                                                onclick="regenerateVector({{ point.id }})" 
+                                                title="重新生成向量">
+                                            <i class="fas fa-sync-alt"></i>
+                                        </button>
+                                    </div>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- 分頁 -->
+                {% if total_pages > 1 %}
+                <div class="d-flex justify-content-center mt-4">
+                    <nav>
+                        <ul class="pagination">
+                            {% if page > 1 %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('admin_bp.knowledge_points_list', page=page-1, per_page=per_page, has_vector=has_vector) }}">
+                                    <i class="fas fa-chevron-left"></i>
+                                </a>
+                            </li>
+                            {% endif %}
+
+                            {% for p in range(max(1, page-2), min(total_pages+1, page+3)) %}
+                            <li class="page-item {% if p == page %}active{% endif %}">
+                                <a class="page-link" href="{{ url_for('admin_bp.knowledge_points_list', page=p, per_page=per_page, has_vector=has_vector) }}">
+                                    {{ p }}
+                                </a>
+                            </li>
+                            {% endfor %}
+
+                            {% if page < total_pages %}
+                            <li class="page-item">
+                                <a class="page-link" href="{{ url_for('admin_bp.knowledge_points_list', page=page+1, per_page=per_page, has_vector=has_vector) }}">
+                                    <i class="fas fa-chevron-right"></i>
+                                </a>
+                            </li>
+                            {% endif %}
+                        </ul>
+                    </nav>
+                </div>
+                {% endif %}
+
+                {% else %}
+                <div class="text-center py-5">
+                    <i class="fas fa-search fa-3x text-muted mb-3"></i>
+                    <p class="text-muted">找不到符合條件的知識點</p>
+                    <a href="{{ url_for('admin_bp.knowledge_points_list') }}" class="btn btn-primary">
+                        查看全部知識點
+                    </a>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 詳情模態框 -->
+<div class="modal fade" id="detailModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">知識點詳情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="detailModalBody">
+                <!-- 動態載入內容 -->
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 相關知識點模態框 -->
+<div class="modal fade" id="similarModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">相關知識點</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="similarModalBody">
+                <!-- 動態載入內容 -->
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block extra_scripts %}
+<script>
+function batchProcess() {
+    if (confirm('確定要開始批次處理嗎？這可能需要一些時間。')) {
+        const btn = event.target;
+        const originalText = btn.innerHTML;
+        btn.disabled = true;
+        btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i>處理中...';
+        
+        fetch('/admin/api/batch-process', {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('jwt_token'),
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ limit: 100 })
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(`批次處理完成！\n成功: ${data.result.success}\n失敗: ${data.result.failed}`);
+                window.location.reload();
+            } else {
+                alert('批次處理失敗: ' + (data.error || '未知錯誤'));
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('批次處理時發生錯誤');
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        });
+    }
+}
+
+function regenerateVector(pointId) {
+    if (confirm(`確定要重新生成知識點 ${pointId} 的向量嗎？`)) {
+        fetch(`/admin/api/regenerate-point/${pointId}`, {
+            method: 'POST',
+            headers: {
+                'Authorization': 'Bearer ' + localStorage.getItem('jwt_token'),
+                'Content-Type': 'application/json'
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                alert(data.message + `\n建立關聯: ${data.links_created} 個`);
+                window.location.reload();
+            } else {
+                alert('重新生成失敗: ' + (data.error || '未知錯誤'));
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('重新生成時發生錯誤');
+        });
+    }
+}
+
+function viewDetails(pointId) {
+    // 載入知識點詳情
+    fetch(`/api/data/knowledge_point/${pointId}`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.knowledge_point) {
+                const point = data.knowledge_point;
+                const html = `
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <strong>ID:</strong> ${point.id}
+                        </div>
+                        <div class="col-12">
+                            <strong>正確用法:</strong><br>
+                            ${point.correct_phrase || '無資料'}
+                        </div>
+                        <div class="col-12">
+                            <strong>重點摘要:</strong><br>
+                            ${point.key_point_summary || '無摘要'}
+                        </div>
+                        <div class="col-12">
+                            <strong>詳細解釋:</strong><br>
+                            ${point.explanation || '無解釋'}
+                        </div>
+                        <div class="col-6">
+                            <strong>分類:</strong> ${point.category || '未分類'}
+                        </div>
+                        <div class="col-6">
+                            <strong>子分類:</strong> ${point.subcategory || '未分類'}
+                        </div>
+                        <div class="col-12">
+                            <strong>用戶語境:</strong><br>
+                            ${point.user_context_sentence || '無語境'}
+                        </div>
+                    </div>
+                `;
+                document.getElementById('detailModalBody').innerHTML = html;
+                new bootstrap.Modal(document.getElementById('detailModal')).show();
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('載入詳情時發生錯誤');
+        });
+}
+
+function showSimilar(pointId) {
+    // 載入相關知識點
+    fetch(`/api/embedding/find_similar/${pointId}?threshold=0.7&max_results=10`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.status === 'success') {
+                let html = '<div class="list-group">';
+                
+                if (data.similar_points.length > 0) {
+                    data.similar_points.forEach(point => {
+                        html += `
+                            <div class="list-group-item d-flex justify-content-between align-items-start">
+                                <div class="ms-2 me-auto">
+                                    <div class="fw-bold">${point.correct_phrase}</div>
+                                    <small class="text-muted">${point.key_point_summary || '無摘要'}</small>
+                                </div>
+                                <span class="badge bg-primary rounded-pill">${point.similarity_score.toFixed(3)}</span>
+                            </div>
+                        `;
+                    });
+                } else {
+                    html += '<div class="text-center text-muted py-3">找不到相關知識點</div>';
+                }
+                
+                html += '</div>';
+                document.getElementById('similarModalBody').innerHTML = html;
+                new bootstrap.Modal(document.getElementById('similarModal')).show();
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('載入相關知識點時發生錯誤');
+        });
+}
+</script>
+{% endblock %}
