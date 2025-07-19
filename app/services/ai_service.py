@@ -3,9 +3,21 @@
 import os
 import json
 import random
-import openai
-import google.generativeai as genai
 from app.assets import EXAMPLE_SENTENCE_BANK
+
+# 條件式導入 AI 服務 - 避免部署時強制安裝
+openai = None
+genai = None
+
+try:
+    import openai
+except ImportError:
+    print("警告: openai 套件未安裝，OpenAI 功能將無法使用")
+
+try:
+    import google.generativeai as genai
+except ImportError:
+    print("警告: google-generativeai 套件未安裝，Gemini 功能將無法使用")
 
 MONITOR_MODE = True
 
@@ -19,23 +31,28 @@ AVAILABLE_MODELS = {
 DEFAULT_GENERATION_MODEL = "gemini-2.5-pro"
 DEFAULT_GRADING_MODEL = "gemini-2.5-flash"
 
-try:
-    openai_client = openai.OpenAI() if os.environ.get("OPENAI_API_KEY") else None
-except openai.OpenAIError:
-    openai_client = None
-    print("警告: OPENAI_API_KEY 未設定或無效。")
+# OpenAI 初始化
+openai_client = None
+if openai and os.environ.get("OPENAI_API_KEY"):
+    try:
+        openai_client = openai.OpenAI()
+    except Exception as e:
+        print(f"初始化 OpenAI 時發生錯誤: {e}")
+else:
+    print("警告: OpenAI 未啟用（套件未安裝或 API KEY 未設定）")
 
-try:
-    gemini_api_key = os.environ.get("GEMINI_API_KEY")
-    if gemini_api_key:
+# Gemini 初始化  
+gemini_api_key = None
+gemini_generation_config = None
+if genai and os.environ.get("GEMINI_API_KEY"):
+    try:
+        gemini_api_key = os.environ.get("GEMINI_API_KEY")
         genai.configure(api_key=gemini_api_key)
         gemini_generation_config = genai.GenerationConfig(response_mime_type="application/json")
-    else:
-        gemini_api_key = None
-        print("警告: GEMINI_API_KEY 未設定。")
-except Exception as e:
-    gemini_api_key = None
-    print(f"初始化 Gemini 時發生錯誤: {e}")
+    except Exception as e:
+        print(f"初始化 Gemini 時發生錯誤: {e}")
+else:
+    print("警告: Gemini 未啟用（套件未安裝或 API KEY 未設定）")
 
 # --- 文法庫讀取 ---
 try:
@@ -1008,7 +1025,11 @@ def batch_enhance_vocabulary_definitions(word_list, model_name=None):
 
 def fetch_cambridge_definition(word):
     """調用劍橋字典API（或備用免費API）"""
-    import requests
+    try:
+        import requests
+    except ImportError:
+        print("警告: requests 套件未安裝，字典API功能將無法使用")
+        return None
     
     # 首先嘗試免費的字典API（因為劍橋字典API需要付費）
     try:

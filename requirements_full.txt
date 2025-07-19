@@ -1,0 +1,25 @@
+# === 完整版 requirements.txt（包含所有功能）===
+
+# === 核心 Web 框架與部署 ===
+flask==2.3.3
+gunicorn==21.2.0
+
+# === 資料庫連接 ===
+psycopg2-binary==2.9.7
+
+# === 用戶認證與安全 ===
+flask-jwt-extended==4.5.3
+bcrypt==4.0.1
+
+# === 環境變數管理 ===
+python-dotenv==1.0.0
+
+# === 知識點向量化功能 ===
+sentence-transformers==2.2.2
+scikit-learn==1.3.0
+numpy==1.24.3
+
+# === AI 服務（OpenAI & Gemini）===
+openai==0.28.1
+google-generativeai==0.3.1
+requests==2.31.0
